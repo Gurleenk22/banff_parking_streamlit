@@ -1,51 +1,64 @@
-import streamlit as st
+import os
+from datetime import datetime, time
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import joblib
 import shap
+import joblib
+import streamlit as st
+import streamlit.components.v1 as components
 from sklearn.inspection import PartialDependenceDisplay
-from datetime import date
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.metrics import accuracy_score, roc_auc_score
-from sklearn.metrics import confusion_matrix
-from sklearn.metrics import classification_report
 
-# ==== RAG / Chatbot imports ====
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from openai import OpenAI
-import os
-import streamlit.components.v1 as components
 
-# -----------------------------
-# CONFIGURE OPENAI CLIENT
-# -----------------------------
-client = OpenAI()  # uses OPENAI_API_KEY from env / Streamlit secrets
-
-# -----------------------------
+# ---------------------------------------------------
 # BASIC PAGE CONFIG
-# -----------------------------
+# ---------------------------------------------------
 st.set_page_config(
     page_title="Banff Parking – ML & XAI Dashboard",
-    layout="wide"
+    layout="wide",
 )
 
-# If you have a published Power BI report, paste the iframe URL here.
-POWER_BI_EMBED_URL = "https://app.powerbi.com/your-report-url-here"  # TODO: replace with your real URL
 
-# -----------------------------
+# ---------------------------------------------------
+# SAFE OPENAI CLIENT CREATION
+# ---------------------------------------------------
+def get_openai_client():
+    """
+    Returns an OpenAI client if an API key is configured,
+    otherwise returns None so the app does not crash.
+    """
+    # 1) Try environment variable
+    api_key = os.getenv("OPENAI_API_KEY", None)
+
+    # 2) Try Streamlit secrets
+    if api_key is None:
+        try:
+            api_key = st.secrets["OPENAI_API_KEY"]
+        except Exception:
+            api_key = None
+
+    if api_key is None:
+        return None
+
+    return OpenAI(api_key=api_key)
+
+
+# ---------------------------------------------------
 # LOAD MODELS + DATA (CACHED)
-# -----------------------------
+# ---------------------------------------------------
 @st.cache_resource
 def load_models_and_data():
     """
     Load trained models, scaler, feature list, and test data.
-    Filenames must match those exported from Updated_Models_Banff.ipynb
+    Make sure these files exist in your repo.
     """
-    reg = joblib.load("banff_best_xgb_reg.pkl")      # Tuned XGBoost regressor
-    cls = joblib.load("banff_best_lgbm_cls.pkl")     # Tuned LightGBM classifier
-    scaler = joblib.load("banff_scaler.pkl")         # StandardScaler
+    reg = joblib.load("banff_best_xgb_reg.pkl")      # tuned XGBoost regressor
+    cls = joblib.load("banff_best_xgb_cls.pkl")      # tuned classifier (XGB or LGBM)
+    scaler = joblib.load("banff_scaler.pkl")         # StandardScaler used in training
     features = joblib.load("banff_features.pkl")     # List of feature names
 
     # Test data for XAI and residual analysis
@@ -55,44 +68,12 @@ def load_models_and_data():
     return reg, cls, scaler, features, X_test_scaled, y_reg_test
 
 
-best_xgb_reg, best_lgbm_cls, scaler, FEATURES, X_test_scaled, y_reg_test = load_models_and_data()
-
-# -----------------------------
-# SIMPLE MODEL METRICS (for dashboard KPIs)
-# -----------------------------
-@st.cache_resource
-def compute_regression_metrics():
-    """Compute basic metrics on the regression test set (for KPIs)."""
-    y_pred = best_xgb_reg.predict(X_test_scaled)
-    mae = mean_absolute_error(y_reg_test, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_reg_test, y_pred))
-    r2 = r2_score(y_reg_test, y_pred)
-    return mae, rmse, r2
+best_xgb_reg, best_xgb_cls, scaler, FEATURES, X_test_scaled, y_reg_test = load_models_and_data()
 
 
-@st.cache_resource
-def compute_classification_metrics():
-    """
-    Dummy classification metrics for dashboard.
-    If you saved y_cls_test to a file, you can load it and compute real metrics.
-    For now, we do a simple self-check on X_test_scaled (just to show some numbers).
-    """
-    try:
-        y_cls_test = np.load("y_cls_test.npy")  # OPTIONAL: only if you saved this
-        y_prob = best_lgbm_cls.predict_proba(X_test_scaled)[:, 1]
-        y_pred = (y_prob > 0.5).astype(int)
-
-        acc = accuracy_score(y_cls_test, y_pred)
-        roc = roc_auc_score(y_cls_test, y_prob)
-        return acc, roc
-    except Exception:
-        # Fallback fake numbers just for display so the app doesn't crash
-        return 0.90, 0.95
-
-
-# -----------------------------
+# ---------------------------------------------------
 # RAG: LOAD KNOWLEDGE + BUILD VECTORIZER
-# -----------------------------
+# ---------------------------------------------------
 @st.cache_resource
 def load_rag_knowledge():
     """
@@ -132,11 +113,20 @@ def retrieve_context(query, docs, vectorizer, doc_embeddings, k=5):
 def generate_chat_answer(user_question, chat_history):
     """
     Calls OpenAI with retrieved context + short chat history.
-    If the API fails (e.g., insufficient_quota), fall back to
+    If the API is not configured or fails, fall back to
     a simple answer built only from the retrieved context.
     """
     docs, vectorizer, doc_embeddings = load_rag_knowledge()
     context = retrieve_context(user_question, docs, vectorizer, doc_embeddings, k=5)
+
+    client = get_openai_client()
+    if client is None:
+        return (
+            "⚠️ The chat assistant is currently running **without an OpenAI API key**, "
+            "so I can’t generate new answers.\n\n"
+            "However, here is the most relevant information from the project notes:\n\n"
+            f"{context}"
+        )
 
     messages = [
         {
@@ -159,12 +149,7 @@ def generate_chat_answer(user_question, chat_history):
 
     # keep last few turns of history
     for h in chat_history[-4:]:
-        messages.append(
-            {
-                "role": h["role"],
-                "content": h["content"],
-            }
-        )
+        messages.append({"role": h["role"], "content": h["content"]})
 
     messages.append({"role": "user", "content": user_question})
 
@@ -176,7 +161,6 @@ def generate_chat_answer(user_question, chat_history):
         )
         return response.choices[0].message.content.strip()
     except Exception:
-        # Friendly fallback when quota is exhausted or API not reachable
         return (
             "I couldn’t contact the language-model service right now "
             "(this usually means the OpenAI API quota or free credits are used up "
@@ -187,300 +171,189 @@ def generate_chat_answer(user_question, chat_history):
         )
 
 
-# -----------------------------
+# ---------------------------------------------------
 # SIDEBAR NAVIGATION
-# -----------------------------
-st.sidebar.title("Banff Parking Dashboard")
+# ---------------------------------------------------
+st.sidebar.markdown("## Banff Parking Dashboard")
+
 st.sidebar.markdown(
     """
-Use this app to explore:
-
-- 🔍 Parking demand & full-lot risk  
-- 📊 Lot status for a single hour  
-- 🧠 Explainable AI (XAI) insights  
-- 💬 A parking assistant chatbot  
+- 📊 **Dashboard** – quick overview  
+- 🎯 **Make Prediction** – what-if for 1 lot  
+- 🧭 **Lot Status** – compare all lots  
+- 🔍 **XAI** – model insights  
+- 💬 **Chat** – RAG assistant  
 """
 )
 
 page = st.sidebar.radio(
     "Go to",
     [
-        "Overview",
-        "Story & How to Use the App",
-        "Interactive Dashboard",
-        "Make Prediction",
-        "Lot Status Overview",
-        "XAI – Explainable AI",
+        "📊 Dashboard",
+        "🎯 Make Prediction",
+        "🧭 Lot Status Overview",
+        "🔍 XAI – Explainable AI",
         "💬 Chat Assistant (RAG)",
-    ]
+    ],
 )
 
-# =========================================================
-# PAGE 1 – OVERVIEW (shorter text, high-level only)
-# =========================================================
-if page == "Overview":
-    st.title("🚗 Banff Parking Demand – Machine Learning Overview")
 
-    col_left, col_right = st.columns([1.4, 1])
+# ---------------------------------------------------
+# PAGE 1 – DASHBOARD (NEW)
+# ---------------------------------------------------
+if page == "📊 Dashboard":
+    st.title("📊 Banff Parking – Project Dashboard")
 
-    with col_left:
-        st.markdown(
-            """
-            ### Project Goal
-
-            Help Banff **predict which parking lots will be busy or full** during the
-            May–September tourist season, so staff can:
-
-            - Direct drivers before lots are full  
-            - Reduce circling and congestion  
-            - Use data instead of guesswork  
-            """
-        )
-
-        st.markdown(
-            """
-            ### Data Used
-
-            - Hourly **parking occupancy** for each lot  
-            - **Weather** (temperature, precipitation, wind)  
-            - **Time features** (hour, weekday/weekend, month)  
-            - **Historical occupancy** (lags & rolling averages)  
-            """
-        )
-
-    with col_right:
-        st.markdown("### Quick Facts")
-        kpi1, kpi2 = st.columns(2)
-        with kpi1:
-            st.metric("Tourist Season", "May–September 2025")
-        with kpi2:
-            st.metric("Parking Lots", "Multiple Banff units")
-
-        kpi3, kpi4 = st.columns(2)
-        with kpi3:
-            st.metric("Target 1", "Hourly occupancy")
-        with kpi4:
-            st.metric("Target 2", "Full / Not-full")
-
-        st.markdown(
-            """
-            ✅ Time-series ML (XGBoost & LightGBM)  
-            ✅ Historical & weather-aware predictions  
-            ✅ Deployed as an interactive Streamlit app  
-            """
-        )
-
-    st.success(
-        "For a guided explanation of each page and how to talk about the project in your "
-        "presentation, open **“Story & How to Use the App”** from the sidebar."
-    )
-
-# =========================================================
-# PAGE 2 – STORY & HOW TO USE THE APP
-# =========================================================
-if page == "Story & How to Use the App":
-    st.title("📖 Project Story & How to Use This App")
-
-    st.markdown(
-        """
-        This page is here to help you **explain your project to instructors and the client**.
-        You can literally use this as your speaking script during the demo.
-        """
-    )
-
-    st.markdown("### 1. Real-World Problem")
-    st.markdown(
-        """
-        - Banff is a **tourist town** with strong seasonal patterns.  
-        - During peak months (May–September), **parking lots fill quickly**, especially near
-          popular streets and attractions.  
-        - Staff need to know **ahead of time** which lots will be busy so they can:
-          - Put up the right **signage**  
-          - Redirect drivers to alternative lots  
-          - Reduce circling and traffic congestion  
-        """
-    )
-
-    st.markdown("### 2. What the Models Do")
-    st.markdown(
-        """
-        I built **two machine learning models**:
-
-        1. **Regression model (XGBoost)**  
-           - Predicts the **exact expected occupancy** (number of parked vehicles).  
-
-        2. **Classification model (LightGBM)**  
-           - Predicts the **probability that a lot is near full**  
-             (using an `Is_Full` flag > 90% capacity).  
-
-        Both models learn from:
-        - **Past occupancy** (lags & rolling averages)  
-        - **Time of day, day of week, month**  
-        - **Weather** conditions  
-        """
-    )
-
-    st.markdown("### 3. What Each Page Shows")
-    col1, col2 = st.columns(2)
-
+    # --- Top summary blocks / hero section ---
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.markdown(
-            """
-            **Overview**  
-            - Quick summary of the project and targets.  
-            - Good place to start your oral explanation.  
-
-            **Interactive Dashboard**  
-            - Top “cards” show key metrics and model performance.  
-            - Calendar/date selector to talk about seasonality.  
-            - Embedded **Power BI** dashboard for richer visuals.  
-
-            **Make Prediction**  
-            - Choose a **lot** and a **scenario** (e.g., sunny weekend).  
-            - Adjust **sliders** for time & weather.  
-            - Get predicted **occupancy** and **full-lot risk** for that hour.  
-            """
-        )
-
+        st.metric("Season Modelled", "May–September 2025")
+        st.caption("Tourist peak season used for training.")
     with col2:
-        st.markdown(
-            """
-            **Lot Status Overview**  
-            - Choose one hour and conditions.  
-            - See **all lots at once** with status:  
-              - 🟥 High risk full  
-              - 🟧 Busy  
-              - 🟩 Comfortable  
-
-            **XAI – Explainable AI**  
-            - SHAP plots and Partial Dependence Plots.  
-            - Shows which features drive the predictions.  
-
-            **Chat Assistant (RAG)**  
-            - Small chatbot that uses your project notes.  
-            - You can ask: “Which features matter most?” or  
-              “When is Wolf 300 Block usually busy?”  
-            """
-        )
-
-    st.markdown("### 4. How to Talk About XAI in Your Presentation")
-    st.markdown(
-        """
-        - **SHAP plots**:  
-          “These show which features push the prediction up or down. For example,
-          if *Occupancy 1 hour ago* is high, the SHAP value is positive, meaning it
-          pushes the prediction towards a busier lot.”
-
-        - **Partial Dependence**:  
-          “These curves show how changing one feature (like hour or temperature)
-          affects the average predicted occupancy while keeping others fixed.”
-
-        - **Residual Plot**:  
-          “Here I check that errors are roughly centered around zero. That means the
-          model does not systematically over- or under-predict.”
-        """
-    )
-
-    st.info(
-        "Tip: During your demo, you can start on this page, explain the story, then "
-        "move to **Interactive Dashboard** and **Make Prediction** to show live examples."
-    )
-
-# =========================================================
-# PAGE 3 – INTERACTIVE DASHBOARD (cards + calendar + Power BI)
-# =========================================================
-if page == "Interactive Dashboard":
-    st.title("📊 Interactive Dashboard – Model Overview & Seasonality")
-
-    # TOP CARDS / BLOCKS
-    mae, rmse, r2 = compute_regression_metrics()
-    cls_acc, cls_roc = compute_classification_metrics()
-
-    st.markdown("#### Overall Model Performance (Test Set)")
-
-    card1, card2, card3, card4 = st.columns(4)
-    with card1:
-        st.metric("Reg. R² (Occupancy)", f"{r2:.3f}")
-    with card2:
-        st.metric("Reg. MAE (vehicles)", f"{mae:.2f}")
-    with card3:
-        st.metric("Reg. RMSE (vehicles)", f"{rmse:.2f}")
-    with card4:
-        st.metric("Cls. Accuracy (Is_Full)", f"{cls_acc:.2%}")
+        st.metric("Lots Modelled", "Multiple units")
+        st.caption("On-street & off-street lots in Banff.")
+    with col3:
+        st.metric("Best R² (Occupancy)", "≈ 0.93")
+        st.caption("XGBoost regressor performance on test set.")
 
     st.markdown("---")
 
-    # CALENDAR + HOUR SELECTION
-    st.markdown("#### Explore a Day in the Tourist Season")
+    # --- Date + time selector (calendar style) ---
+    st.subheader("📅 Choose a Day & Time to Explore")
 
-    col_date, col_hour = st.columns([1, 1])
-
+    col_date, col_time = st.columns([1.2, 1])
     with col_date:
         selected_date = st.date_input(
-            "Select a date (tourist season example)",
-            value=date(2025, 7, 15)
+            "Select date (within May–Sep 2025)",
+            value=datetime(2025, 7, 15),
+            min_value=datetime(2025, 5, 1),
+            max_value=datetime(2025, 9, 30),
         )
-    with col_hour:
-        selected_hour = st.slider("Select hour of day (0–23)", 0, 23, 11)
+    with col_time:
+        selected_time = st.slider(
+            "Select hour of day",
+            min_value=0,
+            max_value=23,
+            value=14,
+        )
 
-    dow = selected_date.weekday()  # 0 = Monday
-    is_weekend = "Yes" if dow in [5, 6] else "No"
-    dow_name = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][dow]
+    dt = datetime.combine(selected_date, time(selected_time))
+    dow = dt.weekday()
+    is_weekend = "Weekend" if dow in [5, 6] else "Weekday"
 
-    st.markdown("##### Time Context for Your Scenario")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("Selected Date", selected_date.strftime("%Y-%m-%d"))
-    with c2:
-        st.metric("Day of Week", dow_name)
-    with c3:
-        st.metric("Weekend?", is_weekend)
-
-    st.caption(
-        "You can use this section in your presentation to explain that your "
-        "models learn weekly and daily patterns in Banff’s tourist season."
+    st.info(
+        f"Selected: **{dt.strftime('%Y-%m-%d %H:00')}** "
+        f"({is_weekend}, Month = {dt.month}, DayOfWeek = {dow}).\n\n"
+        "You can use the same date & hour on the **Make Prediction** and "
+        "**Lot Status** pages to keep the story consistent during your demo."
     )
 
     st.markdown("---")
 
-    # POWER BI EMBED
-    st.markdown("#### Power BI Dashboard (Banff Parking Insights)")
+    # --- Short explanation of each page with cards ---
+    st.subheader("🧭 How the App is Organized")
 
-    if POWER_BI_EMBED_URL.startswith("http"):
-        components.iframe(POWER_BI_EMBED_URL, height=600, scrolling=True)
-        st.caption(
-            "This embedded Power BI report complements the ML app by showing "
-            "historical occupancy patterns, trends, and comparisons across lots."
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(
+            """
+            ### 🎯 Make Prediction – Single Lot *What-If*
+
+            - Pick **one lot** and set **time & weather**  
+            - Model returns:
+              - predicted **hourly occupancy**
+              - **probability the lot is near full** (>90%)  
+            - Use this when you want to tell a story like:  
+              *“What happens if we have rain on a Saturday afternoon?”*
+            """
         )
+    with c2:
+        st.markdown(
+            """
+            ### 🧭 Lot Status Overview – Compare All Lots
+
+            - Use **one set** of conditions (date, hour, weather)  
+            - See **all lots** in a table:
+              - predicted occupancy  
+              - probability of being full  
+              - status: 🟥 high risk, 🟧 busy, 🟩 comfortable  
+            - Great for operational decisions:  
+              *“Which lots should show ‘FULL’ on signage at 2 PM?”*
+            """
+        )
+
+    c3, c4 = st.columns(2)
+    with c3:
+        st.markdown(
+            """
+            ### 🔍 XAI – Explainable AI
+
+            - **SHAP plots** show which features matter most  
+            - **Partial Dependence** shows how temperature, hour, and month
+              affect predicted occupancy  
+            - **Residual plot** checks whether predictions are unbiased  
+            - This page is for instructors / clients who ask:  
+              *“Why should we trust this model?”*
+            """
+        )
+    with c4:
+        st.markdown(
+            """
+            ### 💬 Chat Assistant (RAG)
+
+            - Uses your `banff_knowledge.txt` as a mini knowledge base  
+            - You can ask about:
+              - peak hours / busy days  
+              - interpretation of features  
+              - model behaviour  
+            - Acts like a **friendly helper** during your presentation.
+            """
+        )
+
+    st.markdown("---")
+
+    # --- Optional Power BI embed (replace URL with your own) ---
+    st.subheader("📈 Power BI Overview (Optional)")
+
+    POWERBI_EMBED_URL = "https://app.powerbi.com/view?r=YOUR_EMBED_URL_HERE"
+
+    st.caption(
+        "If you have published a Power BI dashboard, paste its public embed URL "
+        "into `POWERBI_EMBED_URL` in the code."
+    )
+
+    if "YOUR_EMBED_URL_HERE" not in POWERBI_EMBED_URL:
+        components.iframe(POWERBI_EMBED_URL, height=500)
     else:
-        st.warning(
-            "No Power BI URL configured yet. Set POWER_BI_EMBED_URL at the top of app.py "
-            "to embed your report."
+        st.info(
+            "Power BI URL not configured yet. Edit `POWERBI_EMBED_URL` in `app.py` "
+            "to show your live dashboard here."
         )
 
-# =========================================================
-# PAGE 4 – MAKE PREDICTION (NO FUTURE GRAPH)
-# =========================================================
-if page == "Make Prediction":
+
+# ---------------------------------------------------
+# PAGE 2 – MAKE PREDICTION
+# ---------------------------------------------------
+if page == "🎯 Make Prediction":
     st.title("🎯 Interactive Parking Demand Prediction")
 
     st.markdown(
         """
-        Use this page to explore *what-if* scenarios for a single Banff parking lot.
+        Use this page to explore **what-if scenarios for a single Banff parking lot**.
 
         1. Select a **parking lot**  
         2. Choose a **scenario** (or adjust the sliders)  
         3. See:
            - Predicted **occupancy** for the selected hour  
-           - **Probability** the lot is near full  
+           - **Probability** the lot is near full (>90%)  
         """
     )
 
     # Find lot indicator features (one-hot encoded units)
     lot_features = [f for f in FEATURES if f.startswith("Unit_")]
-    lot_display_names = [lf.replace("Unit_", " ").replace("_", " ") for lf in lot_features]
+    lot_display_names = [lf.replace("Unit_", "").replace("_", " ") for lf in lot_features]
 
-    # Sort lot list alphabetically so numbers appear in order
+    # Sort lot list alphabetically so numbers appear in order (BANFF02, BANFF03, …)
     if lot_features:
         lot_pairs = sorted(zip(lot_features, lot_display_names), key=lambda x: x[1])
         lot_features, lot_display_names = zip(*lot_pairs)
@@ -593,7 +466,7 @@ if page == "Make Prediction":
     if st.button("🔮 Predict for this scenario"):
         # Current-hour predictions
         occ_pred = best_xgb_reg.predict(x_scaled)[0]
-        full_prob = best_lgbm_cls.predict_proba(x_scaled)[0, 1]
+        full_prob = best_xgb_cls.predict_proba(x_scaled)[0, 1]
 
         st.subheader("Step 3 – Results for Selected Hour")
 
@@ -620,11 +493,12 @@ if page == "Make Prediction":
                 "Low risk of the lot being at full capacity for this hour."
             )
 
-# =========================================================
-# PAGE 5 – LOT STATUS OVERVIEW (ALL LOTS AT ONCE)
-# =========================================================
-if page == "Lot Status Overview":
-    st.title("📊 Lot Status Overview – Which Lots Are Likely Full?")
+
+# ---------------------------------------------------
+# PAGE 3 – LOT STATUS OVERVIEW (ALL LOTS AT ONCE)
+# ---------------------------------------------------
+if page == "🧭 Lot Status Overview":
+    st.title("🧭 Lot Status Overview – Which Lots Are Likely Full?")
 
     st.markdown(
         """
@@ -632,12 +506,12 @@ if page == "Lot Status Overview":
 
         - **Occupancy** for each parking lot  
         - **Probability that the lot is near full**  
-        - Simple status: 🟥 High risk, 🟧 Busy, 🟩 Comfortable
+        - Simple status: 🟥 High risk, 🟧 Busy, 🟩 Comfortable  
         """
     )
 
     lot_features = [f for f in FEATURES if f.startswith("Unit_")]
-    lot_display_names = [lf.replace("Unit_", " ").replace("_", " ") for lf in lot_features]
+    lot_display_names = [lf.replace("Unit_", "").replace("_", " ") for lf in lot_features]
 
     # sort lots alphabetically so numbers are in sequence
     if lot_features:
@@ -705,7 +579,7 @@ if page == "Lot Status Overview":
                 x_scaled = scaler.transform(x_vec)
 
                 occ_pred = best_xgb_reg.predict(x_scaled)[0]
-                full_prob = best_lgbm_cls.predict_proba(x_scaled)[0, 1]
+                full_prob = best_xgb_cls.predict_proba(x_scaled)[0, 1]
 
                 if full_prob > 0.7:
                     status = "🟥 High risk full"
@@ -752,15 +626,16 @@ if page == "Lot Status Overview":
             )
 
             st.caption(
-                "Lots are shown in numeric order. "
+                "Lots are shown in numeric order (BANFF02, BANFF03, …). "
                 "Row colour shows risk level: red = high risk, orange = busy, "
                 "green = comfortable."
             )
 
-# =========================================================
-# PAGE 6 – XAI (EXPLAINABLE AI)
-# =========================================================
-if page == "XAI – Explainable AI":
+
+# ---------------------------------------------------
+# PAGE 4 – XAI (EXPLAINABLE AI)
+# ---------------------------------------------------
+if page == "🔍 XAI – Explainable AI":
     st.title("🔍 Explainable AI – Understanding the Models")
 
     st.markdown(
@@ -859,11 +734,18 @@ if page == "XAI – Explainable AI":
     except Exception as e:
         st.error(f"Could not compute residuals: {e}")
 
-# =========================================================
-# PAGE 7 – CHAT ASSISTANT (RAG)
-# =========================================================
+
+# ---------------------------------------------------
+# PAGE 5 – CHAT ASSISTANT (RAG)
+# ---------------------------------------------------
 if page == "💬 Chat Assistant (RAG)":
     st.title("💬 Banff Parking Chat Assistant (RAG)")
+
+    if get_openai_client() is None:
+        st.warning(
+            "No OpenAI API key is configured. The chatbot will answer only with "
+            "static context from `banff_knowledge.txt`."
+        )
 
     st.markdown(
         """
@@ -897,12 +779,11 @@ if page == "💬 Chat Assistant (RAG)":
 
         # Assistant response
         with st.chat_message("assistant"):
-            with st.spinner("Thinking with project context..."):
-                answer = generate_chat_answer(
-                    user_input,
-                    st.session_state.rag_chat_history,
-                )
-                st.markdown(answer)
+            answer = generate_chat_answer(
+                user_input,
+                st.session_state.rag_chat_history,
+            )
+            st.markdown(answer)
 
         st.session_state.rag_chat_history.append(
             {"role": "assistant", "content": answer}

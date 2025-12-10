@@ -389,6 +389,7 @@ with tab_insights:
 
     left, right = st.columns(2)
 
+    # Regression model
     with left:
         st.markdown("**Regression model (Occupancy)**")
         try:
@@ -410,6 +411,7 @@ with tab_insights:
         except Exception as e:
             st.error(f"Could not plot regression features: {e}")
 
+    # Classification model
     with right:
         st.markdown("**Classification model (Is_Full)**")
         try:
@@ -429,10 +431,10 @@ with tab_insights:
             else:
                 st.info("Model does not expose feature_importances_.")
         except Exception as e:
-            st.error(f"Could not plot classification features: {e})
+            st.error(f"Could not plot classification features: {e}")
 
     st.markdown("---")
     st.markdown(
-        "Key drivers usually include: time of day, day of week, recent occupancy history, "
+        "Key drivers usually include: time of day, weekday/weekend, recent occupancy history, "
         "and weather (temperature, precipitation, wind)."
     )

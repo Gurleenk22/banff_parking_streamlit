@@ -8,69 +8,124 @@ from pathlib import Path
 from typing import List, Dict
 
 # ---------------------------------------------------
-# PAGE CONFIG + STYLING
+# PAGE CONFIG + PASTEL GLASS STYLING
 # ---------------------------------------------------
 st.set_page_config(
-    page_title="Banff Smart Parking – ML & XAI Dashboard",
+    page_title="Path Finders – Banff Smart Parking",
     layout="wide"
 )
 
 st.markdown(
     """
     <style>
+        /* Pastel gradient background */
         .main {
-            background-color: #0f172a;
-            color: #e5e7eb;
+            background: linear-gradient(135deg, #e0f4ff, #fce4ff, #fff5e6);
         }
+
+        /* Remove default padding a bit */
+        .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 1.5rem;
+        }
+
         .app-header {
-            font-size: 2.3rem;
-            font-weight: 750;
-            margin-bottom: 0.2rem;
-        }
-        .app-subtitle {
-            color: #9ca3af;
-            font-size: 0.9rem;
-            margin-bottom: 1.2rem;
-        }
-        .card {
-            padding: 1rem 1.25rem;
-            border-radius: 0.9rem;
-            background: radial-gradient(circle at top left, #1d283a, #020617);
-            border: 1px solid rgba(148, 163, 184, 0.3);
-            box-shadow: 0 18px 45px rgba(15, 23, 42, 0.7);
-            margin-bottom: 0.75rem;
-        }
-        .metric-title {
-            font-size: 0.8rem;
+            font-size: 2.8rem;
+            font-weight: 800;
+            letter-spacing: 0.05em;
             text-transform: uppercase;
-            color: #9ca3af;
-            letter-spacing: 0.08em;
+            text-align: center;
+            color: #334155;
+            margin-bottom: 0.3rem;
         }
+
+        .app-subtitle {
+            text-align: center;
+            color: #64748b;
+            font-size: 0.95rem;
+            margin-bottom: 2.0rem;
+        }
+
+        /* Glassmorphism card */
+        .glass-card {
+            padding: 1.4rem 1.7rem;
+            border-radius: 1.4rem;
+            background: rgba(255, 255, 255, 0.25);
+            border: 1px solid rgba(255, 255, 255, 0.7);
+            box-shadow: 0 18px 50px rgba(148, 163, 184, 0.5);
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
+        }
+
+        .metric-title {
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            color: #64748b;
+            letter-spacing: 0.12em;
+        }
+
         .metric-value {
             font-size: 1.6rem;
-            font-weight: 600;
+            font-weight: 650;
             margin-top: 0.3rem;
+            color: #0f172a;
         }
+
         .metric-badge {
             display: inline-block;
-            padding: 0.15rem 0.6rem;
+            padding: 0.18rem 0.7rem;
             border-radius: 999px;
             font-size: 0.75rem;
-            background: rgba(56, 189, 248, 0.15);
-            color: #38bdf8;
+            background: rgba(56, 189, 248, 0.17);
+            color: #0284c7;
             margin-top: 0.4rem;
         }
-        .pill-tabs > div[role="tablist"] {
-            gap: 0.5rem;
+
+        /* Buttons – pill style */
+        .stButton > button {
+            border-radius: 999px;
+            padding: 0.5rem 1.6rem;
+            border: none;
+            font-weight: 600;
+            font-size: 0.95rem;
+            background: linear-gradient(135deg, #a5b4fc, #f9a8d4);
+            color: #0f172a;
+            box-shadow: 0 10px 30px rgba(148, 163, 184, 0.7);
         }
-        .pill-tabs button[role="tab"] {
-            border-radius: 999px !important;
-            padding-top: 0.4rem !important;
-            padding-bottom: 0.4rem !important;
+
+        .stButton > button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 15px 35px rgba(148, 163, 184, 0.9);
         }
+
+        /* Small page chips on top of inner pages */
+        .page-chip {
+            display: inline-block;
+            padding: 0.25rem 0.8rem;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            background: rgba(148, 163, 184, 0.24);
+            color: #475569;
+            margin-bottom: 0.6rem;
+        }
+
+        .page-title {
+            font-size: 1.6rem;
+            font-weight: 700;
+            color: #1f2937;
+            margin-bottom: 0.3rem;
+        }
+
+        .page-subtitle {
+            font-size: 0.9rem;
+            color: #6b7280;
+            margin-bottom: 1.2rem;
+        }
+
         .stDataFrame {
-            border-radius: 0.75rem;
+            border-radius: 1rem;
             overflow: hidden;
+            background: rgba(255, 255, 255, 0.5);
         }
     </style>
     """,
@@ -187,24 +242,20 @@ def make_predictions(row: pd.Series,
 def congestion_level(percent_occupancy: float):
     """Convert predicted occupancy (0–1) to label for congestion."""
     if percent_occupancy < 0.4:
-        return "Low", "✅ Easy parking"
+        return "Low", "Easy parking"
     elif percent_occupancy < 0.75:
-        return "Medium", "⚠️ Getting busy"
+        return "Medium", "Getting busy"
     else:
-        return "High", "🚨 Very crowded"
+        return "High", "Very crowded"
 
 
-# Cached SHAP computation for regression model
 @st.cache_resource(show_spinner=True)
 def compute_shap_global(data: pd.DataFrame,
                         feature_list: List[str],
                         reg_model,
                         scaler,
                         sample_size: int = 200):
-    """
-    Compute global SHAP values on a random sample for the regression model.
-    Done lazily so the app stays responsive.
-    """
+    """Compute SHAP values on a random sample for global explanation."""
     try:
         import shap
     except ModuleNotFoundError:
@@ -230,116 +281,108 @@ def compute_shap_global(data: pd.DataFrame,
     return shap_values, X
 
 
-# Load data & models
+# ---------------------------------------------------
+# LOAD DATA & MODELS
+# ---------------------------------------------------
 data = load_data()
 reg_model, cls_model, scaler, feature_list = load_models_and_features()
 
 # ---------------------------------------------------
-# HEADER (always visible)
+# SIMPLE PAGE ROUTING (HOME + INNER PAGES)
 # ---------------------------------------------------
-st.markdown('<div class="app-header">Banff Smart Parking</div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="app-subtitle">Machine-learning & XAI dashboard for hourly parking demand forecasting.</div>',
-    unsafe_allow_html=True
-)
+if "page" not in st.session_state:
+    st.session_state["page"] = "home"
+
+
+def goto(page_name: str):
+    st.session_state["page"] = page_name
+
 
 # ---------------------------------------------------
-# TABS – PURE APP STYLE
+# HOME / LANDING PAGE – PATH FINDERS ONLY
 # ---------------------------------------------------
-with st.container():
-    st.markdown('<div class="pill-tabs">', unsafe_allow_html=True)
-    tab_overview, tab_forecast, tab_xai, tab_data = st.tabs(
-        ["🏠 Overview", "🚗 Forecast", "🧠 XAI Insights", "📊 Data"]
+if st.session_state["page"] == "home":
+    # Big centered title + subtitle
+    st.markdown('<div class="app-header">PATH FINDERS</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="app-subtitle">'
+        'Banff Smart Parking – ML & Explainable AI Dashboard'
+        '</div>',
+        unsafe_allow_html=True
     )
-    st.markdown('</div>', unsafe_allow_html=True)
 
-# ---------------------------------------------------
-# 🏠 OVERVIEW TAB
-# ---------------------------------------------------
-with tab_overview:
-    # Top cards
-    c1, c2, c3, c4 = st.columns(4)
+    # Centered glass card with navigation buttons
+    col_center = st.columns([0.15, 0.7, 0.15])[1]
+    with col_center:
+        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 
-    with c1:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown('<div class="metric-title">Records</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="metric-value">{len(data):,}</div>', unsafe_allow_html=True)
-        st.markdown('<span class="metric-badge">Hourly observations</span>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+        # Quick stats row
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown('<div class="metric-title">Records</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="metric-value">{len(data):,}</div>',
+                unsafe_allow_html=True
+            )
+        with c2:
+            units = data["Unit"].nunique()
+            st.markdown('<div class="metric-title">Parking lots</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="metric-value">{units}</div>',
+                unsafe_allow_html=True
+            )
+        with c3:
+            if "Timestamp" in data.columns:
+                min_date = data["Timestamp"].min().strftime("%Y-%m-%d")
+                max_date = data["Timestamp"].max().strftime("%Y-%m-%d")
+            else:
+                min_date = max_date = "-"
+            st.markdown('<div class="metric-title">Data range</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="metric-value" style="font-size:1rem;">{min_date} → {max_date}</div>',
+                unsafe_allow_html=True
+            )
 
-    with c2:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        units = data["Unit"].nunique()
-        st.markdown('<div class="metric-title">Parking lots</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="metric-value">{units}</div>', unsafe_allow_html=True)
-        st.markdown('<span class="metric-badge">Different units in Banff</span>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown("---")
 
-    with c3:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        if "Timestamp" in data.columns:
-            min_date = data["Timestamp"].min().strftime("%Y-%m-%d")
-            max_date = data["Timestamp"].max().strftime("%Y-%m-%d")
-        else:
-            min_date = max_date = "-"
-        st.markdown('<div class="metric-title">Data range</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="metric-value">{min_date}</div>', unsafe_allow_html=True)
-        st.markdown(f'<span class="metric-badge">to {max_date}</span>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    with c4:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown('<div class="metric-title">Models</div>', unsafe_allow_html=True)
-        st.markdown('<div class="metric-value">XGBoost & LGBM</div>', unsafe_allow_html=True)
-        st.markdown('<span class="metric-badge">Reg: occupancy • Cls: near-full</span>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    # Quick explanation row (short)
-    col_left, col_right = st.columns([1.3, 1])
-
-    with col_left:
-        st.markdown("#### How this app helps")
         st.markdown(
-            "- Forecasts **hourly occupancy** per parking lot.\n"
-            "- Estimates **risk of near capacity (> 90%)**.\n"
-            "- Shows **which factors drive demand** using ML + XAI.\n"
-            "- Built on: time-of-day, weekday/weekend, weather, and past occupancy trends."
+            "<p style='text-align:center; color:#6b7280; font-size:0.9rem;'>"
+            "Choose what you want to explore:"
+            "</p>",
+            unsafe_allow_html=True
         )
 
-    with col_right:
-        st.markdown("#### Typical daily pattern (example)")
-        unit_example = data["Unit"].value_counts().index[0]
-        df_ex = data[data["Unit"] == unit_example].copy()
-        if "Timestamp" in df_ex.columns:
-            date_ex = df_ex["Timestamp"].dt.date.mode()[0]
-            day_df = df_ex[df_ex["Timestamp"].dt.date == date_ex]
-            if not day_df.empty:
-                fig, ax = plt.subplots()
-                ax.plot(day_df["Hour"], day_df["Percent_Occupancy"] * 100, marker="o")
-                ax.set_xlabel("Hour")
-                ax.set_ylabel("Occupancy (%)")
-                ax.set_title(f"{unit_example} on {date_ex}")
-                ax.set_xticks(range(0, 24, 2))
-                ax.grid(True, linestyle="--", linewidth=0.4)
-                st.pyplot(fig)
-            else:
-                st.info("No data for sample pattern.")
-        else:
-            st.info("Timestamp column missing in data.")
+        b1, b2, b3 = st.columns(3)
+        with b1:
+            if st.button("🚗 Forecast Dashboard"):
+                goto("forecast")
+        with b2:
+            if st.button("🧠 XAI Insights"):
+                goto("xai")
+        with b3:
+            if st.button("📊 Data Explorer"):
+                goto("data")
+
+        st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------
-# 🚗 FORECAST TAB – MAIN PREDICTION UI
+# INNER PAGE: FORECAST DASHBOARD
 # ---------------------------------------------------
-with tab_forecast:
-    st.markdown("### Hourly parking demand forecast")
+elif st.session_state["page"] == "forecast":
+    st.markdown('<span class="page-chip">Forecast</span>', unsafe_allow_html=True)
+    st.markdown('<div class="page-title">Hourly Parking Forecast</div>', unsafe_allow_html=True)
     st.markdown(
-        "Select a parking lot, date, and time. The app predicts occupancy and near-full risk."
+        '<div class="page-subtitle">Select lot, date, and time to predict occupancy and near-full risk.</div>',
+        unsafe_allow_html=True
     )
+    st.button("← Back to Path Finders", on_click=lambda: goto("home"))
 
+    # Glass container
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     c1, c2, c3 = st.columns(3)
     with c1:
         pred_unit = st.selectbox(
-            "Parking lot (Unit)",
+            "Parking lot",
             sorted(data["Unit"].unique()),
             key="pred_unit"
         )
@@ -372,6 +415,7 @@ with tab_forecast:
 
     if not available_dates or pred_date is None:
         st.warning("No data available for this lot.")
+        st.markdown('</div>', unsafe_allow_html=True)
     else:
         selected_hour = pred_time.hour
         filtered = unit_df[unit_df["Timestamp"].dt.date == pred_date]
@@ -379,6 +423,7 @@ with tab_forecast:
 
         if row_match.empty:
             st.info("No exact hour found for this date. Try a different time.")
+            st.markdown('</div>', unsafe_allow_html=True)
         else:
             row = row_match.iloc[0]
 
@@ -389,17 +434,13 @@ with tab_forecast:
                     f"Wind gust: {row['Spd of Max Gust (km/h)']} km/h"
                 )
             else:
-                weather_str = "Weather not available in this file"
+                weather_str = "Weather not available"
 
-            st.markdown("#### Selected scenario")
             st.markdown(
-                f"- **Lot:** {pred_unit}  \n"
-                f"- **Date:** {pred_date}  \n"
-                f"- **Time:** {selected_hour:02d}:00  \n"
-                f"- **Weather:** {weather_str}"
+                f"**Scenario:** {pred_unit} • {pred_date} • {selected_hour:02d}:00 • {weather_str}"
             )
 
-            run = st.button("🚗 Run forecast for this hour")
+            run = st.button("Run forecast", key="run_forecast")
 
             if run:
                 try:
@@ -413,38 +454,33 @@ with tab_forecast:
                         pred_percent = 0.0
 
                     level, msg = congestion_level(pred_percent)
-                    near_capacity_flag = pred_percent >= 0.90  # > 90% full
+                    near_capacity_flag = pred_percent >= 0.90
 
-                    top_a, top_b, top_c, top_d = st.columns(4)
+                    m1, m2, m3, m4 = st.columns(4)
 
-                    with top_a:
-                        st.markdown('<div class="card">', unsafe_allow_html=True)
+                    with m1:
                         st.markdown('<div class="metric-title">Predicted occupancy</div>', unsafe_allow_html=True)
                         st.markdown(
                             f'<div class="metric-value">{y_pred:.0f} / {int(capacity)}</div>',
                             unsafe_allow_html=True
                         )
                         st.markdown(
-                            f'<span class="metric-badge">{pred_percent * 100:.1f}% full</span>',
+                            f'<span class="metric-badge">{pred_percent*100:.1f}% full</span>',
                             unsafe_allow_html=True
                         )
-                        st.markdown('</div>', unsafe_allow_html=True)
 
-                    with top_b:
-                        st.markdown('<div class="card">', unsafe_allow_html=True)
+                    with m2:
                         st.markdown('<div class="metric-title">Near-full probability</div>', unsafe_allow_html=True)
                         st.markdown(
-                            f'<div class="metric-value">{full_prob * 100:.1f}%</div>',
+                            f'<div class="metric-value">{full_prob*100:.1f}%</div>',
                             unsafe_allow_html=True
                         )
                         st.markdown(
                             '<span class="metric-badge">Model: classifier</span>',
                             unsafe_allow_html=True
                         )
-                        st.markdown('</div>', unsafe_allow_html=True)
 
-                    with top_c:
-                        st.markdown('<div class="card">', unsafe_allow_html=True)
+                    with m3:
                         st.markdown('<div class="metric-title">Congestion level</div>', unsafe_allow_html=True)
                         st.markdown(
                             f'<div class="metric-value">{level}</div>',
@@ -454,37 +490,27 @@ with tab_forecast:
                             f'<span class="metric-badge">{msg}</span>',
                             unsafe_allow_html=True
                         )
-                        st.markdown('</div>', unsafe_allow_html=True)
 
-                    with top_d:
-                        st.markdown('<div class="card">', unsafe_allow_html=True)
+                    with m4:
                         st.markdown('<div class="metric-title">Near capacity? (&gt; 90%)</div>', unsafe_allow_html=True)
-                        answer = "YES" if near_capacity_flag else "NO"
-                        colour = "#22c55e" if not near_capacity_flag else "#f97316"
+                        ans = "YES" if near_capacity_flag else "NO"
+                        col = "#16a34a" if not near_capacity_flag else "#fb923c"
                         st.markdown(
-                            f'<div class="metric-value" style="color:{colour};">{answer}</div>',
+                            f'<div class="metric-value" style="color:{col};">{ans}</div>',
                             unsafe_allow_html=True
                         )
                         st.markdown(
-                            '<span class="metric-badge">Threshold: 90% occupancy</span>',
+                            '<span class="metric-badge">Threshold at 90%</span>',
                             unsafe_allow_html=True
-                        )
-                        st.markdown('</div>', unsafe_allow_html=True)
-
-                    # Optional: compare with actual historic value
-                    if all(col in row.index for col in ["Occupancy", "Capacity", "Percent_Occupancy", "Is_Full"]):
-                        st.markdown("#### Historical value (same hour, same lot)")
-                        st.markdown(
-                            f"- **Actual:** {row['Occupancy']} / {int(row['Capacity'])} "
-                            f"({row['Percent_Occupancy']*100:.1f}%)  \n"
-                            f"- **Actual Is_Full label:** {row['Is_Full']}"
                         )
 
                 except Exception as e:
                     st.error(f"Prediction error: {e}")
 
-            # Daily curve (hour-by-hour forecast for selected day)
-            st.markdown("### Hour-by-hour forecast for this day")
+            st.markdown("---")
+
+            # Hour-by-hour forecast curve for the same day
+            st.markdown("**Hourly forecast for selected day**")
             day_df = filtered.copy()
             if not day_df.empty:
                 preds = []
@@ -505,30 +531,35 @@ with tab_forecast:
                 ax2.plot(day_df["Hour"], np.array(preds) * 100, marker="o")
                 ax2.set_xlabel("Hour")
                 ax2.set_ylabel("Predicted occupancy (%)")
-                ax2.set_title(f"Forecast for {pred_unit} on {pred_date}")
+                ax2.set_title(f"Forecast – {pred_unit} on {pred_date}")
                 ax2.set_xticks(range(0, 24, 2))
                 ax2.grid(True, linestyle="--", linewidth=0.4)
                 st.pyplot(fig2)
             else:
                 st.info("No rows for this day to plot.")
 
-# ---------------------------------------------------
-# 🧠 XAI INSIGHTS TAB – FEATURE IMPORTANCE + SHAP
-# ---------------------------------------------------
-with tab_xai:
-    st.markdown("### Explainable AI: what drives the predictions?")
-    st.markdown(
-        "This view shows **global drivers** (feature importance, SHAP summary) "
-        "and **local explanation** for a single prediction."
-    )
+            st.markdown('</div>', unsafe_allow_html=True)
 
-    # GLOBAL – SHAP summary for regression model
+# ---------------------------------------------------
+# INNER PAGE: XAI INSIGHTS
+# ---------------------------------------------------
+elif st.session_state["page"] == "xai":
+    st.markdown('<span class="page-chip">XAI</span>', unsafe_allow_html=True)
+    st.markdown('<div class="page-title">Explainable AI Insights</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="page-subtitle">See which features drive the model and explain single predictions.</div>',
+        unsafe_allow_html=True
+    )
+    st.button("← Back to Path Finders", on_click=lambda: goto("home"))
+
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+
     shap_values, X_shap = compute_shap_global(data, feature_list, reg_model, scaler)
 
     col_left, col_right = st.columns(2)
 
     with col_left:
-        st.markdown("#### Global importance (model built-in)")
+        st.markdown("**Global feature importance (regression model)**")
         try:
             if hasattr(reg_model, "feature_importances_"):
                 fi_reg = pd.DataFrame({
@@ -540,7 +571,6 @@ with tab_xai:
                 ax1.barh(fi_reg["Feature"], fi_reg["Importance"])
                 ax1.set_xlabel("Importance")
                 ax1.set_ylabel("")
-                ax1.set_title("Top features – regression model")
                 ax1.invert_yaxis()
                 st.pyplot(fig1)
             else:
@@ -549,9 +579,9 @@ with tab_xai:
             st.error(f"Could not plot feature importance: {e}")
 
     with col_right:
-        st.markdown("#### Global SHAP summary (regression)")
+        st.markdown("**Global SHAP summary (regression)**")
         if shap_values is None or X_shap is None:
-            st.info("SHAP library not available or SHAP could not be computed.")
+            st.info("SHAP not available or could not be computed.")
         else:
             try:
                 import shap
@@ -562,11 +592,10 @@ with tab_xai:
                 st.error(f"Could not render SHAP summary plot: {e}")
 
     st.markdown("---")
-    st.markdown("### Local explanation for one prediction")
+    st.markdown("**Local explanation – one hourly record**")
 
-    # Select any row from data for explanation
     idx = st.slider(
-        "Choose an hourly record to explain",
+        "Pick a record index",
         min_value=0,
         max_value=len(data) - 1,
         value=0,
@@ -575,35 +604,22 @@ with tab_xai:
     row_local = data.iloc[idx]
 
     st.markdown(
-        f"- **Unit:** {row_local['Unit']}  \n"
-        f"- **Timestamp:** {row_local['Timestamp']}  \n"
-        f"- **Observed occupancy:** "
-        f"{row_local.get('Occupancy', 'N/A')} / {int(row_local.get('Capacity', 0))}"
+        f"- Unit: **{row_local['Unit']}**  \n"
+        f"- Time: **{row_local['Timestamp']}**"
     )
 
-    if st.button("Explain this record", key="explain_button"):
-        # Make prediction for this row
-        try:
-            y_pred_l, full_prob_l, _ = make_predictions(
-                row_local, reg_model, cls_model, scaler, feature_list
-            )
-        except Exception as e:
-            st.error(f"Could not predict for local explanation: {e}")
-            y_pred_l, full_prob_l = None, None
-
+    if st.button("Explain this prediction", key="explain_button"):
         if shap_values is None or X_shap is None:
             st.info("SHAP global sample not available; local explanation disabled.")
         else:
             try:
                 import shap
-                # Rebuild features for this single row
                 X_local = build_feature_vector(row_local, feature_list)
                 X_local_scaled = scaler.transform(X_local)
 
                 explainer_local = shap.TreeExplainer(reg_model)
                 shap_local = explainer_local.shap_values(X_local_scaled)
 
-                st.markdown("#### SHAP contribution (top 10 features)")
                 fig_loc, ax_loc = plt.subplots(figsize=(5, 5))
                 shap.plots.bar(
                     shap.Explanation(values=shap_local[0],
@@ -617,52 +633,59 @@ with tab_xai:
             except Exception as e:
                 st.error(f"Could not compute local SHAP explanation: {e}")
 
-# ---------------------------------------------------
-# 📊 DATA TAB – CONTEXT & EXPLORER
-# ---------------------------------------------------
-with tab_data:
-    st.markdown("### Data explorer & daily patterns")
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    # Metrics again for context
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
+# ---------------------------------------------------
+# INNER PAGE: DATA EXPLORER
+# ---------------------------------------------------
+elif st.session_state["page"] == "data":
+    st.markdown('<span class="page-chip">Data</span>', unsafe_allow_html=True)
+    st.markdown('<div class="page-title">Data Explorer</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="page-subtitle">View raw hourly records and daily patterns for each lot.</div>',
+        unsafe_allow_html=True
+    )
+    st.button("← Back to Path Finders", on_click=lambda: goto("home"))
+
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+
+    # Top metrics
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
         st.markdown('<div class="metric-title">Records</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="metric-value">{len(data):,}</div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    with col2:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="metric-value">{len(data):,}</div>',
+            unsafe_allow_html=True
+        )
+    with c2:
         units = data["Unit"].nunique()
         st.markdown('<div class="metric-title">Parking lots</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="metric-value">{units}</div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    with col3:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="metric-value">{units}</div>',
+            unsafe_allow_html=True
+        )
+    with c3:
         if "Timestamp" in data.columns:
             min_date = data["Timestamp"].min().strftime("%Y-%m-%d")
             max_date = data["Timestamp"].max().strftime("%Y-%m-%d")
         else:
             min_date = max_date = "-"
         st.markdown('<div class="metric-title">Data range</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="metric-value">{min_date}</div>', unsafe_allow_html=True)
-        st.markdown(f'<span class="metric-badge">to {max_date}</span>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    with col4:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="metric-value" style="font-size:1rem;">{min_date} → {max_date}</div>',
+            unsafe_allow_html=True
+        )
+    with c4:
         st.markdown('<div class="metric-title">Targets</div>', unsafe_allow_html=True)
-        st.markdown('<div class="metric-value">Occupancy</div>', unsafe_allow_html=True)
-        st.markdown('<span class="metric-badge">Is_Full (0/1)</span>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="metric-value" style="font-size:1.1rem;">Occupancy / Is_Full</div>',
+            unsafe_allow_html=True
+        )
 
-    # Pattern + table
     left, right = st.columns([1.6, 1])
 
     with left:
-        st.markdown("#### Daily pattern by lot")
-
+        st.markdown("**Daily pattern by lot**")
         unit_list = sorted(data["Unit"].unique())
         selected_unit = st.selectbox("Lot", unit_list, key="dash_unit")
 
@@ -697,13 +720,15 @@ with tab_data:
             st.info("No dates available for this lot.")
 
     with right:
-        st.markdown("#### Sample data")
+        st.markdown("**Sample records**")
         cols_to_show = [
             c for c in ["Timestamp", "Unit", "Occupancy", "Capacity", "Percent_Occupancy"]
             if c in data.columns
         ]
         st.dataframe(
             data[cols_to_show]
-            .head(20)
+            .head(25)
             .reset_index(drop=True)
         )
+
+    st.markdown('</div>', unsafe_allow_html=True)

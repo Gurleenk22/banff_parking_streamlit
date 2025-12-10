@@ -4,6 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import joblib
 from datetime import time
+from pathlib import Path
 
 # ---------------------------------------------------
 # PAGE CONFIG + STYLING
@@ -80,7 +81,26 @@ st.markdown(
 # ---------------------------------------------------
 @st.cache_data(show_spinner=True)
 def load_data():
-    df = pd.read_csv("banff_parking_engineered_HOURLY.csv")
+    # Try multiple possible CSV names
+    possible_files = [
+        "banff_parking_engineered_HOURLY.csv",
+        "banff_parking_engineered_HOURLY (1).csv",
+        "banff_parking_engineered_HOURLY(1).csv",
+    ]
+    csv_path = None
+    for fname in possible_files:
+        if Path(fname).exists():
+            csv_path = fname
+            break
+
+    if csv_path is None:
+        st.error(
+            "CSV file not found. Please make sure one of these files is in the repo "
+            "root: 'banff_parking_engineered_HOURLY.csv' or 'banff_parking_engineered_HOURLY (1).csv'."
+        )
+        st.stop()
+
+    df = pd.read_csv(csv_path)
 
     # Timestamp
     if "Timestamp" in df.columns:
@@ -310,7 +330,7 @@ with tab_predict:
                 f"Precip: {row['Total Precip (mm)']} mm • Wind gust: {row['Spd of Max Gust (km/h)']} km/h"
             )
 
-            run = st.button("🚗 Predict parking demand", type="primary")
+            run = st.button("🚗 Predict parking demand")
 
             if run:
                 try:

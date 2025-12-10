@@ -95,34 +95,22 @@ def load_data():
 
     if csv_path is None:
         st.error(
-            "CSV file not found. Please make sure one of these files is in the repo "
-            "root: 'banff_parking_engineered_HOURLY.csv' or 'banff_parking_engineered_HOURLY (1).csv'."
+            "CSV file not found. Please upload: banff_parking_engineered_HOURLY.csv "
+            "to the root of the repo."
         )
         st.stop()
 
     df = pd.read_csv(csv_path)
 
-    # Timestamp
+    # Timestamp & simple time features for UI
     if "Timestamp" in df.columns:
         df["Timestamp"] = pd.to_datetime(df["Timestamp"])
+        df["Hour"] = df["Timestamp"].dt.hour
+        df["DayOfWeek"] = df["Timestamp"].dt.dayofweek
 
-    # Ensure engineered features exist
-    if "Hour" in df.columns and "hour" not in df.columns:
-        df["hour"] = df["Hour"]
-    if "DayOfWeek" in df.columns and "dow" not in df.columns:
-        df["dow"] = df["DayOfWeek"]
-    if "Timestamp" in df.columns and "day_of_year" not in df.columns:
-        df["day_of_year"] = df["Timestamp"].dt.dayofyear
-
-    if "hour" in df.columns:
-        df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
-        df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
-    if "dow" in df.columns:
-        df["dow_sin"] = np.sin(2 * np.pi * df["dow"] / 7)
-        df["dow_cos"] = np.cos(2 * np.pi * df["dow"] / 7)
-
-    if "DayOfWeek" in df.columns and "is_weekend" not in df.columns:
-        df["is_weekend"] = df["DayOfWeek"].isin([5, 6]).astype(int)
+    # Percent occupancy might already be there; if not, compute from Occupancy/Capacity
+    if "Percent_Occupancy" not in df.columns and {"Occupancy", "Capacity"} <= set(df.columns):
+        df["Percent_Occupancy"] = df["Occupancy"] / df["Capacity"]
 
     return df
 
@@ -144,12 +132,42 @@ def load_models_and_features():
     return reg, cls, scaler, features
 
 
-def make_predictions(row, reg, cls, scaler, features):
-    missing = [f for f in features if f not in row.index]
-    if missing:
-        raise ValueError(f"Missing features in data row: {missing}")
+# ---------------------------------------------------
+# FEATURE PREPARATION FOR A SINGLE ROW
+# ---------------------------------------------------
+def build_feature_vector(row: pd.Series, features: list[str]) -> pd.DataFrame:
+    """
+    Build a 1-row DataFrame with all features required by the model.
 
-    X = row[features].to_frame().T
+    - If feature exists in row: use its value
+    - If feature starts with 'Unit_': create one-hot from row['Unit']
+    - Otherwise: default to 0.0 (safe value for missing engineered features)
+    """
+    row_dict = {}
+
+    for f in features:
+        if f in row.index:
+            # Direct column present in CSV
+            row_dict[f] = row[f]
+        elif f.startswith("Unit_") and "Unit" in row.index:
+            # One-hot encode Unit
+            unit_name = f[len("Unit_"):]
+            row_dict[f] = 1.0 if str(row["Unit"]) == unit_name else 0.0
+        else:
+            # Missing engineered feature (lags, rolling stats, etc.)
+            # Use 0.0 as neutral default
+            row_dict[f] = 0.0
+
+    X = pd.DataFrame([row_dict])[features]
+    return X
+
+
+def make_predictions(row, reg, cls, scaler, features):
+    """
+    Prepare feature vector (even if many engineered features are not
+    stored in the CSV) and run both models.
+    """
+    X = build_feature_vector(row, features)
     X_scaled = scaler.transform(X)
 
     demand_pred = float(reg.predict(X_scaled)[0])
@@ -212,8 +230,11 @@ with tab_dashboard:
 
     with col3:
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        min_date = data["Timestamp"].min().strftime("%Y-%m-%d")
-        max_date = data["Timestamp"].max().strftime("%Y-%m-%d")
+        if "Timestamp" in data.columns:
+            min_date = data["Timestamp"].min().strftime("%Y-%m-%d")
+            max_date = data["Timestamp"].max().strftime("%Y-%m-%d")
+        else:
+            min_date = max_date = "-"
         st.markdown('<div class="metric-title">Data range</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="metric-value">{min_date}</div>', unsafe_allow_html=True)
         st.markdown(f'<span class="metric-badge">to {max_date}</span>', unsafe_allow_html=True)
@@ -236,7 +257,10 @@ with tab_dashboard:
         selected_unit = st.selectbox("Lot", unit_list, key="dash_unit")
 
         unit_df = data[data["Unit"] == selected_unit].copy()
-        available_dates = sorted(unit_df["Timestamp"].dt.date.unique())
+        if "Timestamp" in unit_df.columns:
+            available_dates = sorted(unit_df["Timestamp"].dt.date.unique())
+        else:
+            available_dates = []
 
         if available_dates:
             selected_date = st.date_input(
@@ -264,8 +288,9 @@ with tab_dashboard:
 
     with right:
         st.markdown("#### 🔎 Sample data")
+        cols_to_show = [c for c in ["Timestamp", "Unit", "Occupancy", "Capacity", "Percent_Occupancy"] if c in data.columns]
         st.dataframe(
-            data[["Timestamp", "Unit", "Occupancy", "Capacity", "Percent_Occupancy"]]
+            data[cols_to_show]
             .head(15)
             .reset_index(drop=True)
         )
@@ -286,7 +311,10 @@ with tab_predict:
         )
 
     unit_df = data[data["Unit"] == pred_unit].copy()
-    available_dates = sorted(unit_df["Timestamp"].dt.date.unique())
+    if "Timestamp" in unit_df.columns:
+        available_dates = sorted(unit_df["Timestamp"].dt.date.unique())
+    else:
+        available_dates = []
 
     with c2:
         if available_dates:
@@ -311,7 +339,6 @@ with tab_predict:
     if not available_dates or pred_date is None:
         st.warning("No data available for this lot.")
     else:
-        # Filter for date + hour
         selected_hour = pred_time.hour
         filtered = unit_df[unit_df["Timestamp"].dt.date == pred_date]
         row_match = filtered[filtered["Hour"] == selected_hour]
@@ -322,12 +349,20 @@ with tab_predict:
             row = row_match.iloc[0]
 
             st.markdown("#### Selected context")
+            if all(col in row.index for col in ["Max Temp (°C)", "Min Temp (°C)", "Total Precip (mm)", "Spd of Max Gust (km/h)"]):
+                weather_str = (
+                    f"{row['Max Temp (°C)']}°C / {row['Min Temp (°C)']}°C • "
+                    f"Precip: {row['Total Precip (mm)']} mm • "
+                    f"Wind gust: {row['Spd of Max Gust (km/h)']} km/h"
+                )
+            else:
+                weather_str = "Weather not available in this file"
+
             st.markdown(
                 f"- **Lot:** {pred_unit}  \n"
                 f"- **Date:** {pred_date}  \n"
                 f"- **Time:** {selected_hour:02d}:00  \n"
-                f"- **Weather:** {row['Max Temp (°C)']}°C / {row['Min Temp (°C)']}°C • "
-                f"Precip: {row['Total Precip (mm)']} mm • Wind gust: {row['Spd of Max Gust (km/h)']} km/h"
+                f"- **Weather:** {weather_str}"
             )
 
             run = st.button("🚗 Predict parking demand")
@@ -337,7 +372,7 @@ with tab_predict:
                     y_pred, full_prob, label = make_predictions(
                         row, reg_model, cls_model, scaler, feature_list
                     )
-                    capacity = row["Capacity"]
+                    capacity = row.get("Capacity", 0)
                     if capacity > 0:
                         pred_percent = float(np.clip(y_pred / capacity, 0, 1))
                     else:
@@ -391,12 +426,13 @@ with tab_predict:
                         )
                         st.markdown('</div>', unsafe_allow_html=True)
 
-                    st.markdown("#### Historical value (same hour)")
-                    st.markdown(
-                        f"- Actual: **{row['Occupancy']} / {int(row['Capacity'])}** "
-                        f"({row['Percent_Occupancy']*100:.1f}%)  \n"
-                        f"- Actual Is_Full: **{row['Is_Full']}**"
-                    )
+                    if all(col in row.index for col in ["Occupancy", "Capacity", "Percent_Occupancy", "Is_Full"]):
+                        st.markdown("#### Historical value (same hour)")
+                        st.markdown(
+                            f"- Actual: **{row['Occupancy']} / {int(row['Capacity'])}** "
+                            f"({row['Percent_Occupancy']*100:.1f}%)  \n"
+                            f"- Actual Is_Full: **{row['Is_Full']}**"
+                        )
 
                 except Exception as e:
                     st.error(f"Prediction error: {e}")

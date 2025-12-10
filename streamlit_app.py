@@ -28,9 +28,7 @@ def load_models_and_data():
     """
     Load trained models, scaler, feature list, and test data.
 
-    Regression model is mandatory. Classification model (LightGBM) is optional:
-    if it cannot be loaded, cls will be None and the app will simply skip
-    classification-based outputs.
+    Regression model is mandatory. Classification model is optional.
     """
     try:
         reg = joblib.load("banff_best_xgb_reg.pkl")          # XGBoost regressor
@@ -39,10 +37,8 @@ def load_models_and_data():
         X_test_scaled = np.load("X_test_scaled.npy")         # For XAI / residuals
         y_reg_test = np.load("y_reg_test.npy")               # True y for residuals
     except Exception as e:
-        # If core files are missing, we can't run the app
         return None, None, None, [], None, None, f"Core model files missing: {e}"
 
-    # Try to load LightGBM classifier; if it fails, we allow the app to run without it
     cls = None
     cls_error = None
     try:
@@ -65,6 +61,27 @@ else:
             CLS_ERROR
             + " – classification-based probabilities will be unavailable."
         )
+
+# ---------------------------------------------------
+# LOAD CAPACITY FROM RAW CSV (FOR REALISTIC INPUTS)
+# ---------------------------------------------------
+@st.cache_resource
+def load_capacity_map():
+    """
+    Returns a dict {Unit name -> median Capacity} from the engineered hourly CSV.
+    Used so that the app passes realistic Capacity values into the models.
+    """
+    path = "banff_parking_engineered_HOURLY (1).csv"
+    try:
+        df = pd.read_csv(path)
+        if "Unit" in df.columns and "Capacity" in df.columns:
+            cap_map = df.groupby("Unit")["Capacity"].median().to_dict()
+            return cap_map
+    except Exception:
+        pass
+    return {}
+
+CAPACITY_MAP = load_capacity_map()
 
 # ---------------------------------------------------
 # OPENAI CLIENT (SAFE – WON'T CRASH IF KEY MISSING)
@@ -170,7 +187,6 @@ def generate_chat_answer(user_question, chat_history):
         },
     ]
 
-    # keep last few turns of history
     for h in chat_history[-4:]:
         messages.append({"role": h["role"], "content": h["content"]})
 
@@ -318,6 +334,36 @@ your Banff parking problem.
     )
 
 # ---------------------------------------------------
+# SMALL HELPER: FILL CAPACITY
+# ---------------------------------------------------
+def fill_capacity_for_lot(lot_label: str) -> float:
+    """Return a sensible capacity for a given lot label."""
+    if CAPACITY_MAP and lot_label in CAPACITY_MAP:
+        return float(CAPACITY_MAP[lot_label])
+
+    # Fallback: median over all lots or default 50
+    if CAPACITY_MAP:
+        return float(np.median(list(CAPACITY_MAP.values())))
+    return 50.0
+
+# ---------------------------------------------------
+# SMALL HELPER: BUILD CLASSIFICATION INPUT
+# ---------------------------------------------------
+def build_cls_input_from_base(base_input: dict, occ_pred: float) -> dict:
+    """
+    Take base_input (time, weather, lot, capacity, lags=0)
+    and fill occupancy-related lag / rolling features using the
+    regression prediction so the classifier sees a realistic
+    'already busy' state.
+    """
+    cls_input = base_input.copy()
+    for feat in FEATURES:
+        if "Occupancy" in feat and feat in cls_input:
+            # Use same occupancy value as proxy for all occupancy-based features
+            cls_input[feat] = occ_pred
+    return cls_input
+
+# ---------------------------------------------------
 # PAGE 3 – MAKE PREDICTION
 # ---------------------------------------------------
 if page == "Make Prediction":
@@ -387,11 +433,12 @@ Use this page to explore *what-if* scenarios for a **single Banff parking lot**.
             wind_gust = st.slider("Speed of Max Gust (km/h)", 0.0, 100.0, 12.0)
 
         st.caption(
-            "Lag features (previous-hour occupancy, rolling averages) are handled by "
-            "the trained model and are not entered manually here."
+            "Lag features (previous-hour occupancy, rolling averages) are estimated "
+            "automatically from the regression prediction so the classifier sees a"
+            " realistic busy/quiet state."
         )
 
-        # Build feature dict starting from all zeros
+        # Build base feature dict starting from all zeros
         base_input = {f: 0 for f in FEATURES}
 
         # Time & weather
@@ -410,23 +457,31 @@ Use this page to explore *what-if* scenarios for a **single Banff parking lot**.
         if "Spd of Max Gust (km/h)" in base_input:
             base_input["Spd of Max Gust (km/h)"] = wind_gust
 
+        # Capacity – get realistic value from CSV
+        if "Capacity" in base_input and selected_lot_label is not None:
+            base_input["Capacity"] = fill_capacity_for_lot(selected_lot_label)
+
         # Lot indicator – one-hot
         if selected_lot_feature is not None and selected_lot_feature in base_input:
             base_input[selected_lot_feature] = 1
 
-        x_vec = np.array([base_input[f] for f in FEATURES]).reshape(1, -1)
-        x_scaled = scaler.transform(x_vec)
+        # ---------- Regression prediction ----------
+        x_vec_reg = np.array([base_input[f] for f in FEATURES]).reshape(1, -1)
+        x_scaled_reg = scaler.transform(x_vec_reg)
+        occ_pred = best_xgb_reg.predict(x_scaled_reg)[0]
+
+        # ---------- Classification prediction (using occupancy-based lags) ----------
+        full_prob = None
+        if best_cls_model is not None:
+            try:
+                cls_input = build_cls_input_from_base(base_input, occ_pred)
+                x_vec_cls = np.array([cls_input[f] for f in FEATURES]).reshape(1, -1)
+                x_scaled_cls = scaler.transform(x_vec_cls)
+                full_prob = best_cls_model.predict_proba(x_scaled_cls)[0, 1]
+            except Exception:
+                full_prob = None
 
         if st.button("🔮 Predict for this scenario"):
-            occ_pred = best_xgb_reg.predict(x_scaled)[0]
-
-            full_prob = None
-            if best_cls_model is not None:
-                try:
-                    full_prob = best_cls_model.predict_proba(x_scaled)[0, 1]
-                except Exception:
-                    full_prob = None
-
             st.subheader("Step 3 – Results")
 
             col_res1, col_res2 = st.columns(2)
@@ -508,43 +563,51 @@ if page == "Lot Status Overview":
             is_weekend = 1 if day_of_week in [5, 6] else 0
 
             st.caption(
-                "Lag features (previous-hour occupancy, rolling averages) are set "
-                "to 0 for this overview. In a real system they would come from live feeds."
+                "Lag features are estimated from the regression prediction for each lot "
+                "so the classifier can highlight realistic busy / full situations."
             )
 
             if st.button("Compute lot status"):
                 rows = []
 
-                base_input = {f: 0 for f in FEATURES}
-                if "Month" in base_input:
-                    base_input["Month"] = month
-                if "DayOfWeek" in base_input:
-                    base_input["DayOfWeek"] = day_of_week
-                if "Hour" in base_input:
-                    base_input["Hour"] = hour
-                if "IsWeekend" in base_input:
-                    base_input["IsWeekend"] = is_weekend
-                if "Max Temp (°C)" in base_input:
-                    base_input["Max Temp (°C)"] = max_temp
-                if "Total Precip (mm)" in base_input:
-                    base_input["Total Precip (mm)"] = total_precip
-                if "Spd of Max Gust (km/h)" in base_input:
-                    base_input["Spd of Max Gust (km/h)"] = wind_gust
-
                 for lot_feat, lot_name in zip(lot_features, lot_display_names):
-                    lot_input = base_input.copy()
-                    if lot_feat in lot_input:
-                        lot_input[lot_feat] = 1
+                    # Base input per lot
+                    base_input = {f: 0 for f in FEATURES}
+                    if "Month" in base_input:
+                        base_input["Month"] = month
+                    if "DayOfWeek" in base_input:
+                        base_input["DayOfWeek"] = day_of_week
+                    if "Hour" in base_input:
+                        base_input["Hour"] = hour
+                    if "IsWeekend" in base_input:
+                        base_input["IsWeekend"] = is_weekend
+                    if "Max Temp (°C)" in base_input:
+                        base_input["Max Temp (°C)"] = max_temp
+                    if "Total Precip (mm)" in base_input:
+                        base_input["Total Precip (mm)"] = total_precip
+                    if "Spd of Max Gust (km/h)" in base_input:
+                        base_input["Spd of Max Gust (km/h)"] = wind_gust
+                    if "Capacity" in base_input:
+                        base_input["Capacity"] = fill_capacity_for_lot(lot_name)
 
-                    x_vec = np.array([lot_input[f] for f in FEATURES]).reshape(1, -1)
-                    x_scaled = scaler.transform(x_vec)
+                    if lot_feat in base_input:
+                        base_input[lot_feat] = 1
 
-                    occ_pred = best_xgb_reg.predict(x_scaled)[0]
+                    # Regression prediction
+                    x_vec_reg = np.array([base_input[f] for f in FEATURES]).reshape(1, -1)
+                    x_scaled_reg = scaler.transform(x_vec_reg)
+                    occ_pred = best_xgb_reg.predict(x_scaled_reg)[0]
 
+                    # Classification prediction
                     full_prob = None
                     if best_cls_model is not None:
                         try:
-                            full_prob = best_cls_model.predict_proba(x_scaled)[0, 1]
+                            cls_input = build_cls_input_from_base(base_input, occ_pred)
+                            x_vec_cls = np.array(
+                                [cls_input[f] for f in FEATURES]
+                            ).reshape(1, -1)
+                            x_scaled_cls = scaler.transform(x_vec_cls)
+                            full_prob = best_cls_model.predict_proba(x_scaled_cls)[0, 1]
                         except Exception:
                             full_prob = None
 
@@ -562,7 +625,9 @@ if page == "Lot Status Overview":
                         {
                             "Lot": lot_name,
                             "Predicted occupancy": occ_pred,
-                            "Probability full": full_prob if full_prob is not None else np.nan,
+                            "Probability full": (
+                                full_prob if full_prob is not None else np.nan
+                            ),
                             "Status": status,
                         }
                     )

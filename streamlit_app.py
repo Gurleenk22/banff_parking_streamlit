@@ -97,7 +97,6 @@ st.markdown(
             box-shadow: 0 15px 35px rgba(148, 163, 184, 0.9);
         }
 
-        /* Page chips on top of inner pages */
         .page-chip {
             display: inline-block;
             padding: 0.25rem 0.8rem;
@@ -150,10 +149,9 @@ def load_data() -> pd.DataFrame:
 
     if csv_path is None:
         st.error(
-            "CSV file not found. Please upload one of: "
-            "'banff_parking_engineered_HOURLY.csv' or "
-            "'banff_parking_engineered_HOURLY (1).csv' "
-            "to the root of the repo."
+            "CSV file not found. Place one of these in the repo root:\n"
+            "- banff_parking_engineered_HOURLY.csv\n"
+            "- banff_parking_engineered_HOURLY (1).csv"
         )
         st.stop()
 
@@ -176,18 +174,42 @@ def load_data() -> pd.DataFrame:
 @st.cache_resource(show_spinner=True)
 def load_models_and_features():
     """Load trained models, scaler and the feature list."""
-    reg = joblib.load("banff_best_xgb_reg.pkl")
+    try:
+        reg = joblib.load("banff_best_xgb_reg.pkl")
+    except Exception as e:
+        st.error(f"Could not load regression model banff_best_xgb_reg.pkl: {e}")
+        st.stop()
 
     # Try LGBM first, then XGB classifier
-    try:
-        cls = joblib.load("banff_best_lgbm_cls.pkl")
-    except FileNotFoundError:
-        cls = joblib.load("banff_best_xgb_cls.pkl")
+    cls = None
+    cls_errors = []
+    for fname in ["banff_best_lgbm_cls.pkl", "banff_best_xgb_cls.pkl"]:
+        if Path(fname).exists():
+            try:
+                cls = joblib.load(fname)
+                break
+            except Exception as e:
+                cls_errors.append(f"{fname}: {e}")
 
-    scaler = joblib.load("banff_scaler.pkl")
-    features = joblib.load("banff_features.pkl")
-    if not isinstance(features, list):
-        features = list(features)
+    if cls is None:
+        st.error("Could not load any classification model (banff_best_lgbm_cls.pkl or banff_best_xgb_cls.pkl).")
+        for err in cls_errors:
+            st.text(err)
+        st.stop()
+
+    try:
+        scaler = joblib.load("banff_scaler.pkl")
+    except Exception as e:
+        st.error(f"Could not load scaler banff_scaler.pkl: {e}")
+        st.stop()
+
+    try:
+        features = joblib.load("banff_features.pkl")
+        if not isinstance(features, list):
+            features = list(features)
+    except Exception as e:
+        st.error(f"Could not load feature list banff_features.pkl: {e}")
+        st.stop()
 
     return reg, cls, scaler, features
 
@@ -200,8 +222,8 @@ def build_feature_vector(row: pd.Series, features: List[str]) -> pd.DataFrame:
     Build a 1-row DataFrame with all features required by the model.
 
     - If feature exists in row: use its value
-    - If feature starts with 'Unit_': create one-hot from row['Unit']
-    - Otherwise: default to 0.0 (neutral for missing engineered features)
+    - If feature starts with 'Unit_': one-hot from row['Unit']
+    - Otherwise: default to 0.0
     """
     row_dict: Dict[str, float] = {}
 
@@ -248,44 +270,13 @@ def congestion_level(percent_occupancy: float):
         return "High", "Very crowded"
 
 
-@st.cache_resource(show_spinner=True)
-def compute_shap_global(data: pd.DataFrame,
-                        feature_list: List[str],
-                        reg_model,
-                        scaler,
-                        sample_size: int = 200):
-    """Compute SHAP values on a random sample for global explanation."""
-    try:
-        import shap
-    except ModuleNotFoundError:
-        return None, None
-
-    if len(data) == 0:
-        return None, None
-
-    sample_size = min(sample_size, len(data))
-    idx = np.random.choice(len(data), size=sample_size, replace=False)
-    sample = data.iloc[idx].copy()
-
-    rows = []
-    for _, r in sample.iterrows():
-        rows.append(build_feature_vector(r, feature_list).iloc[0])
-    X = pd.DataFrame(rows)[feature_list]
-
-    X_scaled = scaler.transform(X)
-    explainer = shap.TreeExplainer(reg_model)
-    shap_values = explainer.shap_values(X_scaled)
-
-    return shap_values, X
-
-
 # ---------------------------------------------------
 # LOAD DATA & MODELS
 # ---------------------------------------------------
 data = load_data()
 reg_model, cls_model, scaler, feature_list = load_models_and_features()
 
-# Precompute capacity per lot for future forecasts
+# Capacity per unit for future forecasts
 if "Capacity" in data.columns:
     capacity_map = data.groupby("Unit")["Capacity"].max().to_dict()
 else:
@@ -367,7 +358,7 @@ if st.session_state["page"] == "home":
         st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------
-# INNER PAGE: FORECAST DASHBOARD (HISTORICAL + FUTURE)
+# PAGE: FORECAST DASHBOARD (HISTORICAL + FUTURE)
 # ---------------------------------------------------
 elif st.session_state["page"] == "forecast":
     st.markdown('<span class="page-chip">Forecast</span>', unsafe_allow_html=True)
@@ -380,7 +371,6 @@ elif st.session_state["page"] == "forecast":
 
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 
-    # Lot + forecast type selector
     top_left, top_right = st.columns([1.5, 1])
     with top_left:
         pred_unit = st.selectbox(
@@ -396,7 +386,7 @@ elif st.session_state["page"] == "forecast":
             key="forecast_mode"
         )
 
-    # ---------------- HISTORICAL FORECAST ----------------
+    # ---------- HISTORICAL ----------
     if forecast_mode.startswith("Historical"):
         unit_df = data[data["Unit"] == pred_unit].copy()
         if "Timestamp" not in unit_df.columns:
@@ -520,7 +510,7 @@ elif st.session_state["page"] == "forecast":
                                     unsafe_allow_html=True
                                 )
 
-                            # Show actual
+                            # Show actual (if exists)
                             if all(col in row.index for col in ["Occupancy", "Capacity",
                                                                 "Percent_Occupancy", "Is_Full"]):
                                 st.markdown("**Actual (same hour):**")
@@ -562,9 +552,8 @@ elif st.session_state["page"] == "forecast":
                     else:
                         st.info("No rows for this day to plot.")
 
-    # ---------------- FUTURE FORECAST ----------------
+    # ---------- FUTURE ----------
     else:
-        # Date range for future = from last date in data + 1 up to +365 days
         if "Timestamp" not in data.columns:
             st.warning("Timestamp column missing in data – cannot compute future range.")
             st.markdown('</div>', unsafe_allow_html=True)
@@ -606,14 +595,13 @@ elif st.session_state["page"] == "forecast":
 
             run_future = st.button("Run future forecast", key="run_forecast_future")
 
-            # Capacity from history
             cap_future = capacity_map.get(pred_unit, 100)
 
             if run_future:
                 try:
                     ts = datetime.combine(future_date, future_time)
 
-                    # Build synthetic future row
+                    # Synthetic future row
                     row_future = pd.Series(dtype="float64")
                     row_future["Unit"] = pred_unit
                     row_future["Timestamp"] = ts
@@ -624,7 +612,7 @@ elif st.session_state["page"] == "forecast":
                     row_future["Min Temp (°C)"] = min_temp
                     row_future["Total Precip (mm)"] = precip
                     row_future["Spd of Max Gust (km/h)"] = gust
-                    row_future["Capacity"] = cap_future  # used for % only
+                    row_future["Capacity"] = cap_future
 
                     y_pred_f, full_prob_f, label_f = make_predictions(
                         row_future, reg_model, cls_model, scaler, feature_list
@@ -696,7 +684,6 @@ elif st.session_state["page"] == "forecast":
             st.markdown("---")
             st.markdown("**Future hourly forecast for this date**")
 
-            # Build 24-hour synthetic day with same weather, every hour
             hours = list(range(24))
             preds_day = []
             for h in hours:
@@ -736,25 +723,23 @@ elif st.session_state["page"] == "forecast":
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------
-# INNER PAGE: XAI INSIGHTS
+# PAGE: XAI INSIGHTS (FEATURE IMPORTANCE ONLY)
 # ---------------------------------------------------
 elif st.session_state["page"] == "xai":
     st.markdown('<span class="page-chip">XAI</span>', unsafe_allow_html=True)
     st.markdown('<div class="page-title">Explainable AI Insights</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="page-subtitle">See which features drive the model and explain single predictions.</div>',
+        '<div class="page-subtitle">Which features drive the demand and near-full predictions?</div>',
         unsafe_allow_html=True
     )
     st.button("← Back to Path Finders", on_click=lambda: goto("home"))
 
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 
-    shap_values, X_shap = compute_shap_global(data, feature_list, reg_model, scaler)
-
     col_left, col_right = st.columns(2)
 
     with col_left:
-        st.markdown("**Global feature importance (regression model)**")
+        st.markdown("**Regression model – feature importance**")
         try:
             if hasattr(reg_model, "feature_importances_"):
                 fi_reg = pd.DataFrame({
@@ -766,72 +751,39 @@ elif st.session_state["page"] == "xai":
                 ax1.barh(fi_reg["Feature"], fi_reg["Importance"])
                 ax1.set_xlabel("Importance")
                 ax1.set_ylabel("")
+                ax1.set_title("Top features (occupancy)")
                 ax1.invert_yaxis()
                 st.pyplot(fig1)
             else:
                 st.info("Regression model does not expose feature_importances_.")
         except Exception as e:
-            st.error(f"Could not plot feature importance: {e}")
+            st.error(f"Could not plot regression feature importance: {e}")
 
     with col_right:
-        st.markdown("**Global SHAP summary (regression)**")
-        if shap_values is None or X_shap is None:
-            st.info("SHAP not available or could not be computed.")
-        else:
-            try:
-                import shap
-                fig, ax = plt.subplots(figsize=(5, 5))
-                shap.summary_plot(shap_values, X_shap, show=False)
-                st.pyplot(fig)
-            except Exception as e:
-                st.error(f"Could not render SHAP summary plot: {e}")
+        st.markdown("**Classification model – feature importance**")
+        try:
+            if hasattr(cls_model, "feature_importances_"):
+                fi_cls = pd.DataFrame({
+                    "Feature": feature_list,
+                    "Importance": cls_model.feature_importances_
+                }).sort_values("Importance", ascending=False)[:15]
 
-    st.markdown("---")
-    st.markdown("**Local explanation – one hourly record**")
-
-    idx = st.slider(
-        "Pick a record index",
-        min_value=0,
-        max_value=len(data) - 1,
-        value=0,
-        step=1,
-    )
-    row_local = data.iloc[idx]
-
-    st.markdown(
-        f"- Unit: **{row_local['Unit']}**  \n"
-        f"- Time: **{row_local['Timestamp']}**"
-    )
-
-    if st.button("Explain this prediction", key="explain_button"):
-        if shap_values is None or X_shap is None:
-            st.info("SHAP global sample not available; local explanation disabled.")
-        else:
-            try:
-                import shap
-                X_local = build_feature_vector(row_local, feature_list)
-                X_local_scaled = scaler.transform(X_local)
-
-                explainer_local = shap.TreeExplainer(reg_model)
-                shap_local = explainer_local.shap_values(X_local_scaled)
-
-                fig_loc, ax_loc = plt.subplots(figsize=(5, 5))
-                shap.plots.bar(
-                    shap.Explanation(values=shap_local[0],
-                                     base_values=explainer_local.expected_value,
-                                     data=X_local.iloc[0],
-                                     feature_names=feature_list),
-                    max_display=10,
-                    show=False
-                )
-                st.pyplot(fig_loc)
-            except Exception as e:
-                st.error(f"Could not compute local SHAP explanation: {e}")
+                fig2, ax2 = plt.subplots(figsize=(5, 5))
+                ax2.barh(fi_cls["Feature"], fi_cls["Importance"])
+                ax2.set_xlabel("Importance")
+                ax2.set_ylabel("")
+                ax2.set_title("Top features (near-full risk)")
+                ax2.invert_yaxis()
+                st.pyplot(fig2)
+            else:
+                st.info("Classification model does not expose feature_importances_.")
+        except Exception as e:
+            st.error(f"Could not plot classification feature importance: {e}")
 
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------
-# INNER PAGE: DATA EXPLORER
+# PAGE: DATA EXPLORER
 # ---------------------------------------------------
 elif st.session_state["page"] == "data":
     st.markdown('<span class="page-chip">Data</span>', unsafe_allow_html=True)

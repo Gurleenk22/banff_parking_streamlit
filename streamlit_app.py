@@ -5,12 +5,13 @@ import matplotlib.pyplot as plt
 import joblib
 from datetime import time
 from pathlib import Path
+from typing import List, Dict
 
 # ---------------------------------------------------
 # PAGE CONFIG + STYLING
 # ---------------------------------------------------
 st.set_page_config(
-    page_title="Banff Parking – ML Dashboard",
+    page_title="Banff Parking – Research Questions Dashboard",
     layout="wide"
 )
 
@@ -80,8 +81,11 @@ st.markdown(
 # DATA & MODEL LOADING
 # ---------------------------------------------------
 @st.cache_data(show_spinner=True)
-def load_data():
-    # Try multiple possible CSV names
+def load_data() -> pd.DataFrame:
+    """
+    Load the hourly parking dataset.
+    We only assume basic columns; engineered model features are handled separately.
+    """
     possible_files = [
         "banff_parking_engineered_HOURLY.csv",
         "banff_parking_engineered_HOURLY (1).csv",
@@ -95,7 +99,9 @@ def load_data():
 
     if csv_path is None:
         st.error(
-            "CSV file not found. Please upload: banff_parking_engineered_HOURLY.csv "
+            "CSV file not found. Please upload one of: "
+            "'banff_parking_engineered_HOURLY.csv' or "
+            "'banff_parking_engineered_HOURLY (1).csv' "
             "to the root of the repo."
         )
         st.stop()
@@ -107,8 +113,9 @@ def load_data():
         df["Timestamp"] = pd.to_datetime(df["Timestamp"])
         df["Hour"] = df["Timestamp"].dt.hour
         df["DayOfWeek"] = df["Timestamp"].dt.dayofweek
+        df["Month"] = df["Timestamp"].dt.month
 
-    # Percent occupancy might already be there; if not, compute from Occupancy/Capacity
+    # Percent occupancy for plots
     if "Percent_Occupancy" not in df.columns and {"Occupancy", "Capacity"} <= set(df.columns):
         df["Percent_Occupancy"] = df["Occupancy"] / df["Capacity"]
 
@@ -117,6 +124,7 @@ def load_data():
 
 @st.cache_resource(show_spinner=True)
 def load_models_and_features():
+    """Load trained models, scaler and the feature list."""
     reg = joblib.load("banff_best_xgb_reg.pkl")
 
     # Try LGBM first, then XGB classifier
@@ -129,43 +137,44 @@ def load_models_and_features():
     features = joblib.load("banff_features.pkl")
     if not isinstance(features, list):
         features = list(features)
+
     return reg, cls, scaler, features
 
 
 # ---------------------------------------------------
 # FEATURE PREPARATION FOR A SINGLE ROW
 # ---------------------------------------------------
-def build_feature_vector(row: pd.Series, features: list[str]) -> pd.DataFrame:
+def build_feature_vector(row: pd.Series, features: List[str]) -> pd.DataFrame:
     """
     Build a 1-row DataFrame with all features required by the model.
 
     - If feature exists in row: use its value
     - If feature starts with 'Unit_': create one-hot from row['Unit']
-    - Otherwise: default to 0.0 (safe value for missing engineered features)
+    - Otherwise: default to 0.0 (neutral for missing engineered features)
     """
-    row_dict = {}
+    row_dict: Dict[str, float] = {}
 
     for f in features:
         if f in row.index:
-            # Direct column present in CSV
             row_dict[f] = row[f]
         elif f.startswith("Unit_") and "Unit" in row.index:
-            # One-hot encode Unit
             unit_name = f[len("Unit_"):]
             row_dict[f] = 1.0 if str(row["Unit"]) == unit_name else 0.0
         else:
-            # Missing engineered feature (lags, rolling stats, etc.)
-            # Use 0.0 as neutral default
             row_dict[f] = 0.0
 
     X = pd.DataFrame([row_dict])[features]
     return X
 
 
-def make_predictions(row, reg, cls, scaler, features):
+def make_predictions(row: pd.Series,
+                     reg,
+                     cls,
+                     scaler,
+                     features: List[str]):
     """
-    Prepare feature vector (even if many engineered features are not
-    stored in the CSV) and run both models.
+    Prepare feature vector and run both models.
+    Returns: occupancy prediction, near-full probability, label (0/1).
     """
     X = build_feature_vector(row, features)
     X_scaled = scaler.transform(X)
@@ -178,7 +187,10 @@ def make_predictions(row, reg, cls, scaler, features):
     return demand_pred, full_prob, label
 
 
-def congestion_level(percent_occupancy):
+def congestion_level(percent_occupancy: float):
+    """
+    Convert predicted occupancy (0–1) to human label for congestion.
+    """
     if percent_occupancy < 0.4:
         return "Low", "✅ Easy parking"
     elif percent_occupancy < 0.75:
@@ -187,32 +199,398 @@ def congestion_level(percent_occupancy):
         return "High", "🚨 Very crowded"
 
 
+# Load everything once
 data = load_data()
 reg_model, cls_model, scaler, feature_list = load_models_and_features()
 
 # ---------------------------------------------------
 # HEADER
 # ---------------------------------------------------
-st.markdown('<div class="app-header">Banff Parking AI</div>', unsafe_allow_html=True)
+st.markdown('<div class="app-header">Banff Parking AI – Research Questions</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="app-subtitle">Smart parking demand & congestion forecasts for Banff lots.</div>',
+    """
+    <div class="app-subtitle">
+    This app answers two core questions for the Town of Banff:
+    <br>
+    <b>Q1:</b> Which factors (time, weekday, weather, trends) best predict parking demand?
+    <br>
+    <b>Q2:</b> Can we forecast, hour by hour, when a lot will be near capacity (&gt; 90% full)?
+    </div>
+    """,
     unsafe_allow_html=True
 )
 
 # ---------------------------------------------------
-# TABS (NO SIDEBAR)
+# TABS ALIGNED WITH PROBLEM STATEMENTS
 # ---------------------------------------------------
 with st.container():
     st.markdown('<div class="pill-tabs">', unsafe_allow_html=True)
-    tab_dashboard, tab_predict, tab_insights = st.tabs(
-        ["🏠 Dashboard", "🔮 Predict", "📊 Insights"]
+    tab_q1, tab_q2, tab_data = st.tabs(
+        ["🧠 Q1 – Key Predictors", "🔮 Q2 – Near-Capacity Forecast", "📊 Data Explorer"]
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------
-# 🏠 DASHBOARD TAB
+# 🧠 TAB Q1 – KEY PREDICTORS (Problem Statement 1)
 # ---------------------------------------------------
-with tab_dashboard:
+with tab_q1:
+    st.markdown("### Q1. Which factors are the most reliable predictors of parking demand?")
+    st.markdown(
+        "This view uses **model feature importance** to show which variables "
+        "(time of day, day of week, weather, recent history, etc.) drive the predictions."
+    )
+
+    col_top, col_bottom = st.columns([1.1, 1])
+
+    # --- Top 5 features summary (combined from reg + cls) ---
+    with col_top:
+        st.markdown("#### Top predictors (automatically extracted from the models)")
+
+        try:
+            combined_df = None
+
+            if hasattr(reg_model, "feature_importances_"):
+                fi_reg = pd.DataFrame({
+                    "Feature": feature_list,
+                    "Reg_Importance": reg_model.feature_importances_
+                })
+                combined_df = fi_reg.copy()
+            if hasattr(cls_model, "feature_importances_"):
+                fi_cls = pd.DataFrame({
+                    "Feature": feature_list,
+                    "Cls_Importance": cls_model.feature_importances_
+                })
+                if combined_df is None:
+                    combined_df = fi_cls.copy()
+                else:
+                    combined_df = combined_df.merge(fi_cls, on="Feature", how="outer")
+
+            if combined_df is not None:
+                combined_df = combined_df.fillna(0.0)
+                combined_df["Combined"] = combined_df.get("Reg_Importance", 0) + combined_df.get("Cls_Importance", 0)
+                top5 = combined_df.sort_values("Combined", ascending=False).head(5)
+
+                # Cards for top 3
+                c1, c2, c3 = st.columns(3)
+                top_features = top5["Feature"].tolist()
+
+                def nice_name(feat: str) -> str:
+                    # Quick friendly-name mapping
+                    mapping_keywords = [
+                        ("Hour", "Time of day"),
+                        ("hour", "Time of day"),
+                        ("DayOfWeek", "Day of week"),
+                        ("dow", "Day of week"),
+                        ("Month", "Month / season"),
+                        ("Max Temp", "Max temperature"),
+                        ("Min Temp", "Min temperature"),
+                        ("Total Precip", "Precipitation"),
+                        ("Gust", "Wind / gusts"),
+                        ("Occupancy", "Recent occupancy"),
+                        ("Percent_Occupancy", "Recent occupancy"),
+                        ("roll", "Rolling average / trend"),
+                        ("lag", "Lagged history"),
+                        ("is_weekend", "Weekend / weekday"),
+                        ("Unit_", "Specific parking lot"),
+                    ]
+                    label = feat
+                    for key, nice in mapping_keywords:
+                        if key in feat:
+                            label = nice
+                            break
+                    return label
+
+                # Card 1
+                with c1:
+                    if len(top_features) > 0:
+                        st.markdown('<div class="card">', unsafe_allow_html=True)
+                        st.markdown('<div class="metric-title">#1 Predictor</div>', unsafe_allow_html=True)
+                        st.markdown(
+                            f'<div class="metric-value">{nice_name(top_features[0])}</div>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            f'<span class="metric-badge">{top_features[0]}</span>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown('</div>', unsafe_allow_html=True)
+
+                # Card 2
+                with c2:
+                    if len(top_features) > 1:
+                        st.markdown('<div class="card">', unsafe_allow_html=True)
+                        st.markdown('<div class="metric-title">#2 Predictor</div>', unsafe_allow_html=True)
+                        st.markdown(
+                            f'<div class="metric-value">{nice_name(top_features[1])}</div>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            f'<span class="metric-badge">{top_features[1]}</span>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown('</div>', unsafe_allow_html=True)
+
+                # Card 3
+                with c3:
+                    if len(top_features) > 2:
+                        st.markdown('<div class="card">', unsafe_allow_html=True)
+                        st.markdown('<div class="metric-title">#3 Predictor</div>', unsafe_allow_html=True)
+                        st.markdown(
+                            f'<div class="metric-value">{nice_name(top_features[2])}</div>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            f'<span class="metric-badge">{top_features[2]}</span>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown('</div>', unsafe_allow_html=True)
+
+                st.markdown("**Model answer to Q1:**")
+                st.markdown(
+                    "- Parking demand is mainly explained by **time-of-day / day-of-week patterns**, "
+                    "the **recent occupancy history (lags / rolling averages)**, and **weather variables** "
+                    "(temperature, precipitation, wind). "
+                    "These appear at the top of the importance ranking."
+                )
+            else:
+                st.info("Models do not expose feature_importances_.")
+        except Exception as e:
+            st.error(f"Could not compute top predictors: {e}")
+
+    # --- Detailed feature importance plots ---
+    with col_bottom:
+        st.markdown("#### Detailed feature importance")
+
+        left, right = st.columns(2)
+
+        # Regression model
+        with left:
+            st.markdown("**Regression model (predicts # of occupied stalls)**")
+            try:
+                if hasattr(reg_model, "feature_importances_"):
+                    fi_reg = pd.DataFrame({
+                        "Feature": feature_list,
+                        "Importance": reg_model.feature_importances_
+                    }).sort_values("Importance", ascending=False)[:15]
+
+                    fig1, ax1 = plt.subplots(figsize=(5, 5))
+                    ax1.barh(fi_reg["Feature"], fi_reg["Importance"])
+                    ax1.set_xlabel("Importance")
+                    ax1.set_ylabel("")
+                    ax1.set_title("Top features")
+                    ax1.invert_yaxis()
+                    st.pyplot(fig1)
+                else:
+                    st.info("Regression model does not expose feature_importances_.")
+            except Exception as e:
+                st.error(f"Could not plot regression features: {e}")
+
+        # Classification model
+        with right:
+            st.markdown("**Classification model (probability lot is near full)**")
+            try:
+                if hasattr(cls_model, "feature_importances_"):
+                    fi_cls = pd.DataFrame({
+                        "Feature": feature_list,
+                        "Importance": cls_model.feature_importances_
+                    }).sort_values("Importance", ascending=False)[:15]
+
+                    fig2, ax2 = plt.subplots(figsize=(5, 5))
+                    ax2.barh(fi_cls["Feature"], fi_cls["Importance"])
+                    ax2.set_xlabel("Importance")
+                    ax2.set_ylabel("")
+                    ax2.set_title("Top features")
+                    ax2.invert_yaxis()
+                    st.pyplot(fig2)
+                else:
+                    st.info("Classification model does not expose feature_importances_.")
+            except Exception as e:
+                st.error(f"Could not plot classification features: {e}")
+
+    st.markdown("---")
+    st.markdown(
+        "➡️ **Interpretation for your report:** Time of day, day of week, and recent occupancy "
+        "are the most stable and reliable drivers of parking demand, with weather and seasonal "
+        "effects adding additional variation."
+    )
+
+# ---------------------------------------------------
+# 🔮 TAB Q2 – HOURLY NEAR-CAPACITY FORECAST (Problem Statement 2)
+# ---------------------------------------------------
+with tab_q2:
+    st.markdown("### Q2. Can we forecast, hour-by-hour, when a lot will be near capacity (> 90% full)?")
+    st.markdown(
+        "Use the controls below to select a parking lot, date, and hour. "
+        "The system predicts occupancy and the probability that the lot is **near full**."
+    )
+
+    # --- Scenario selection ---
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        pred_unit = st.selectbox(
+            "Parking lot (Unit)",
+            sorted(data["Unit"].unique()),
+            key="pred_unit"
+        )
+
+    unit_df = data[data["Unit"] == pred_unit].copy()
+    if "Timestamp" in unit_df.columns:
+        available_dates = sorted(unit_df["Timestamp"].dt.date.unique())
+    else:
+        available_dates = []
+
+    with c2:
+        if available_dates:
+            pred_date = st.date_input(
+                "Date",
+                value=available_dates[0],
+                min_value=min(available_dates),
+                max_value=max(available_dates),
+                key="pred_date"
+            )
+        else:
+            pred_date = None
+
+    with c3:
+        pred_time = st.time_input(
+            "Time",
+            value=time(12, 0),
+            step=3600,
+            key="pred_time"
+        )
+
+    if not available_dates or pred_date is None:
+        st.warning("No data available for this lot.")
+    else:
+        selected_hour = pred_time.hour
+        filtered = unit_df[unit_df["Timestamp"].dt.date == pred_date]
+        row_match = filtered[filtered["Hour"] == selected_hour]
+
+        if row_match.empty:
+            st.info("No exact hour found for this date. Try a different time.")
+        else:
+            row = row_match.iloc[0]
+
+            # Context line
+            if all(col in row.index for col in ["Max Temp (°C)", "Min Temp (°C)", "Total Precip (mm)", "Spd of Max Gust (km/h)"]):
+                weather_str = (
+                    f"{row['Max Temp (°C)']}°C / {row['Min Temp (°C)']}°C • "
+                    f"Precip: {row['Total Precip (mm)']} mm • "
+                    f"Wind gust: {row['Spd of Max Gust (km/h)']} km/h"
+                )
+            else:
+                weather_str = "Weather not available in this file"
+
+            st.markdown("#### Selected scenario")
+            st.markdown(
+                f"- **Lot:** {pred_unit}  \n"
+                f"- **Date:** {pred_date}  \n"
+                f"- **Time:** {selected_hour:02d}:00  \n"
+                f"- **Weather:** {weather_str}"
+            )
+
+            run = st.button("🚗 Run hourly forecast")
+
+            if run:
+                try:
+                    y_pred, full_prob, label = make_predictions(
+                        row, reg_model, cls_model, scaler, feature_list
+                    )
+                    capacity = row.get("Capacity", 0)
+                    if capacity > 0:
+                        pred_percent = float(np.clip(y_pred / capacity, 0, 1))
+                    else:
+                        pred_percent = 0.0
+
+                    level, msg = congestion_level(pred_percent)
+                    near_capacity_flag = pred_percent >= 0.90  # > 90% full
+
+                    top_a, top_b, top_c, top_d = st.columns(4)
+
+                    with top_a:
+                        st.markdown('<div class="card">', unsafe_allow_html=True)
+                        st.markdown('<div class="metric-title">Predicted occupancy</div>', unsafe_allow_html=True)
+                        st.markdown(
+                            f'<div class="metric-value">{y_pred:.0f} / {int(capacity)}</div>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            f'<span class="metric-badge">{pred_percent * 100:.1f}% full</span>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown('</div>', unsafe_allow_html=True)
+
+                    with top_b:
+                        st.markdown('<div class="card">', unsafe_allow_html=True)
+                        st.markdown('<div class="metric-title">Near-full probability</div>', unsafe_allow_html=True)
+                        st.markdown(
+                            f'<div class="metric-value">{full_prob * 100:.1f}%</div>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            f'<span class="metric-badge">Model: Is_Full classifier</span>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown('</div>', unsafe_allow_html=True)
+
+                    with top_c:
+                        st.markdown('<div class="card">', unsafe_allow_html=True)
+                        st.markdown('<div class="metric-title">Congestion level</div>', unsafe_allow_html=True)
+                        st.markdown(
+                            f'<div class="metric-value">{level}</div>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            f'<span class="metric-badge">{msg}</span>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown('</div>', unsafe_allow_html=True)
+
+                    with top_d:
+                        st.markdown('<div class="card">', unsafe_allow_html=True)
+                        st.markdown('<div class="metric-title">Near capacity? (&gt; 90%)</div>', unsafe_allow_html=True)
+                        answer = "YES" if near_capacity_flag else "NO"
+                        colour = "#22c55e" if not near_capacity_flag else "#f97316"
+                        st.markdown(
+                            f'<div class="metric-value" style="color:{colour};">{answer}</div>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(
+                            '<span class="metric-badge">Threshold: 90% occupancy</span>',
+                            unsafe_allow_html=True
+                        )
+                        st.markdown('</div>', unsafe_allow_html=True)
+
+                    # Historical actual for comparison
+                    if all(col in row.index for col in ["Occupancy", "Capacity", "Percent_Occupancy", "Is_Full"]):
+                        st.markdown("#### Historical value (same hour, same lot)")
+                        st.markdown(
+                            f"- **Actual:** {row['Occupancy']} / {int(row['Capacity'])} "
+                            f"({row['Percent_Occupancy']*100:.1f}%)  \n"
+                            f"- **Actual Is_Full label:** {row['Is_Full']}"
+                        )
+
+                    st.markdown("---")
+                    st.markdown(
+                        "➡️ **Interpretation for your report:** "
+                        "This system provides an hourly forecast of occupancy and near-full risk. "
+                        "By checking if predicted occupancy exceeds 90%, it can flag hours "
+                        "when a specific lot is likely to operate at or near capacity."
+                    )
+
+                except Exception as e:
+                    st.error(f"Prediction error: {e}")
+
+# ---------------------------------------------------
+# 📊 DATA EXPLORER – CONTEXT & TRENDS
+# ---------------------------------------------------
+with tab_data:
+    st.markdown("### Data Explorer & Daily Patterns")
+    st.markdown(
+        "This tab gives context for the models: overall data size, range, and "
+        "typical daily occupancy patterns for each lot."
+    )
+
     # Top metrics row
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -288,209 +666,12 @@ with tab_dashboard:
 
     with right:
         st.markdown("#### 🔎 Sample data")
-        cols_to_show = [c for c in ["Timestamp", "Unit", "Occupancy", "Capacity", "Percent_Occupancy"] if c in data.columns]
+        cols_to_show = [
+            c for c in ["Timestamp", "Unit", "Occupancy", "Capacity", "Percent_Occupancy"]
+            if c in data.columns
+        ]
         st.dataframe(
             data[cols_to_show]
             .head(15)
             .reset_index(drop=True)
         )
-
-# ---------------------------------------------------
-# 🔮 PREDICT TAB
-# ---------------------------------------------------
-with tab_predict:
-    st.markdown("#### Scenario selection")
-
-    # Controls row
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        pred_unit = st.selectbox(
-            "Lot",
-            sorted(data["Unit"].unique()),
-            key="pred_unit"
-        )
-
-    unit_df = data[data["Unit"] == pred_unit].copy()
-    if "Timestamp" in unit_df.columns:
-        available_dates = sorted(unit_df["Timestamp"].dt.date.unique())
-    else:
-        available_dates = []
-
-    with c2:
-        if available_dates:
-            pred_date = st.date_input(
-                "Date",
-                value=available_dates[0],
-                min_value=min(available_dates),
-                max_value=max(available_dates),
-                key="pred_date"
-            )
-        else:
-            pred_date = None
-
-    with c3:
-        pred_time = st.time_input(
-            "Time",
-            value=time(12, 0),
-            step=3600,  # hourly
-            key="pred_time"
-        )
-
-    if not available_dates or pred_date is None:
-        st.warning("No data available for this lot.")
-    else:
-        selected_hour = pred_time.hour
-        filtered = unit_df[unit_df["Timestamp"].dt.date == pred_date]
-        row_match = filtered[filtered["Hour"] == selected_hour]
-
-        if row_match.empty:
-            st.info("No exact hour found for this date. Try a different time.")
-        else:
-            row = row_match.iloc[0]
-
-            st.markdown("#### Selected context")
-            if all(col in row.index for col in ["Max Temp (°C)", "Min Temp (°C)", "Total Precip (mm)", "Spd of Max Gust (km/h)"]):
-                weather_str = (
-                    f"{row['Max Temp (°C)']}°C / {row['Min Temp (°C)']}°C • "
-                    f"Precip: {row['Total Precip (mm)']} mm • "
-                    f"Wind gust: {row['Spd of Max Gust (km/h)']} km/h"
-                )
-            else:
-                weather_str = "Weather not available in this file"
-
-            st.markdown(
-                f"- **Lot:** {pred_unit}  \n"
-                f"- **Date:** {pred_date}  \n"
-                f"- **Time:** {selected_hour:02d}:00  \n"
-                f"- **Weather:** {weather_str}"
-            )
-
-            run = st.button("🚗 Predict parking demand")
-
-            if run:
-                try:
-                    y_pred, full_prob, label = make_predictions(
-                        row, reg_model, cls_model, scaler, feature_list
-                    )
-                    capacity = row.get("Capacity", 0)
-                    if capacity > 0:
-                        pred_percent = float(np.clip(y_pred / capacity, 0, 1))
-                    else:
-                        pred_percent = 0.0
-
-                    level, msg = congestion_level(pred_percent)
-
-                    top_a, top_b, top_c = st.columns(3)
-
-                    with top_a:
-                        st.markdown('<div class="card">', unsafe_allow_html=True)
-                        st.markdown(
-                            '<div class="metric-title">Predicted occupancy</div>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown(
-                            f'<div class="metric-value">{y_pred:.0f} / {int(capacity)}</div>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown(
-                            f'<span class="metric-badge">{pred_percent * 100:.1f}% full</span>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown('</div>', unsafe_allow_html=True)
-
-                    with top_b:
-                        st.markdown('<div class="card">', unsafe_allow_html=True)
-                        st.markdown(
-                            '<div class="metric-title">Full / near-full risk</div>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown(
-                            f'<div class="metric-value">{full_prob * 100:.1f}%</div>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown(
-                            f'<span class="metric-badge">Level: {level}</span>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown('</div>', unsafe_allow_html=True)
-
-                    with top_c:
-                        st.markdown('<div class="card">', unsafe_allow_html=True)
-                        st.markdown(
-                            '<div class="metric-title">Quick note</div>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown(
-                            f'<div class="metric-value">{msg}</div>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown('</div>', unsafe_allow_html=True)
-
-                    if all(col in row.index for col in ["Occupancy", "Capacity", "Percent_Occupancy", "Is_Full"]):
-                        st.markdown("#### Historical value (same hour)")
-                        st.markdown(
-                            f"- Actual: **{row['Occupancy']} / {int(row['Capacity'])}** "
-                            f"({row['Percent_Occupancy']*100:.1f}%)  \n"
-                            f"- Actual Is_Full: **{row['Is_Full']}**"
-                        )
-
-                except Exception as e:
-                    st.error(f"Prediction error: {e}")
-
-# ---------------------------------------------------
-# 📊 INSIGHTS TAB
-# ---------------------------------------------------
-with tab_insights:
-    st.markdown("#### Feature importance")
-
-    left, right = st.columns(2)
-
-    # Regression model
-    with left:
-        st.markdown("**Regression model (Occupancy)**")
-        try:
-            if hasattr(reg_model, "feature_importances_"):
-                fi_reg = pd.DataFrame({
-                    "Feature": feature_list,
-                    "Importance": reg_model.feature_importances_
-                }).sort_values("Importance", ascending=False)[:15]
-
-                fig1, ax1 = plt.subplots(figsize=(5, 5))
-                ax1.barh(fi_reg["Feature"], fi_reg["Importance"])
-                ax1.set_xlabel("Importance")
-                ax1.set_ylabel("")
-                ax1.set_title("Top features")
-                ax1.invert_yaxis()
-                st.pyplot(fig1)
-            else:
-                st.info("Model does not expose feature_importances_.")
-        except Exception as e:
-            st.error(f"Could not plot regression features: {e}")
-
-    # Classification model
-    with right:
-        st.markdown("**Classification model (Is_Full)**")
-        try:
-            if hasattr(cls_model, "feature_importances_"):
-                fi_cls = pd.DataFrame({
-                    "Feature": feature_list,
-                    "Importance": cls_model.feature_importances_
-                }).sort_values("Importance", ascending=False)[:15]
-
-                fig2, ax2 = plt.subplots(figsize=(5, 5))
-                ax2.barh(fi_cls["Feature"], fi_cls["Importance"])
-                ax2.set_xlabel("Importance")
-                ax2.set_ylabel("")
-                ax2.set_title("Top features")
-                ax2.invert_yaxis()
-                st.pyplot(fig2)
-            else:
-                st.info("Model does not expose feature_importances_.")
-        except Exception as e:
-            st.error(f"Could not plot classification features: {e}")
-
-    st.markdown("---")
-    st.markdown(
-        "Key drivers usually include: time of day, weekday/weekend, recent occupancy history, "
-        "and weather (temperature, precipitation, wind)."
-    )

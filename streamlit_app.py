@@ -24,33 +24,39 @@ try:
 except Exception:
     lgb = None
 
-# ---- CONFIG ----
-st.set_page_config(page_title="Banff Parking – Dashboard", layout="wide")
+# ===================================================
+# BASIC CONFIG
+# ===================================================
+st.set_page_config(page_title="Banff Parking – ML Forecasting", layout="wide")
 
-POWERBI_EMBED_URL = ""  # put your Power BI public URL here if you want
+# 👇 Your Power BI (SharePoint) URL
+POWERBI_EMBED_URL = (
+    "https://norquest-my.sharepoint.com/:u:/g/personal/"
+    "mcranton312_norquest_ca/IQCGmJFaQHgmSZMFXLzhHNCDAZjUw8zWjltT7xmGbJh-Buw?e=1bLfFd"
+)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY) if (OpenAI and OPENAI_API_KEY) else None
 
-# Simple background
+# Light styling
 st.markdown(
     """
     <style>
     .main { background-color:#f5f7fb; }
-    .block-container { padding-top:1.2rem;padding-bottom:1.5rem; }
+    .block-container { padding-top:1.0rem;padding-bottom:1.3rem; }
     section[data-testid="stSidebar"] { background:#ffffff;border-right:1px solid #e5e7eb; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# ---------------------------------------------------
+# ===================================================
 # LOAD MODELS + DATA
-# ---------------------------------------------------
+# ===================================================
 @st.cache_resource(show_spinner=False)
 def load_models_and_data():
-    reg = joblib.load("banff_best_xgb_reg.pkl")
-    cls = joblib.load("banff_best_lgbm_cls.pkl")
+    reg = joblib.load("banff_best_xgb_reg.pkl")      # regression: Occupancy (vehicles)
+    cls = joblib.load("banff_best_lgbm_cls.pkl")     # classification: Is_Full (>90%)
     scaler = joblib.load("banff_scaler.pkl")
     features = joblib.load("banff_features.pkl")
     X_test_scaled = np.load("X_test_scaled.npy")
@@ -79,9 +85,9 @@ except Exception as e:
     MODELS_OK = False
     MODEL_ERROR = str(e)
 
-# ---------------------------------------------------
-# RAG: KNOWLEDGE + CHAT
-# ---------------------------------------------------
+# ===================================================
+# RAG KNOWLEDGE + CHAT
+# ===================================================
 @st.cache_resource(show_spinner=False)
 def load_rag_knowledge():
     path = "banff_knowledge.txt"
@@ -112,19 +118,19 @@ def generate_chat_answer(user_question, history):
     docs, vec, emb = load_rag_knowledge()
     ctx = retrieve_context(user_question, docs, vec, emb, k=5)
 
-    # no API key: just return context
     if client is None:
         return "OpenAI key not set. Context from notes:\n\n" + ctx
 
     messages = [
         {
             "role": "system",
-            "content": "Explain this Banff parking ML project simply.",
+            "content": (
+                "You explain this Banff parking ML project simply. "
+                "Focus on time of day, day of week, weather, and 2025 trends, "
+                "and how the model predicts near-full (>90%) lots hour by hour."
+            ),
         },
-        {
-            "role": "system",
-            "content": f"Project notes:\n{ctx}",
-        },
+        {"role": "system", "content": f"Project notes:\n{ctx}"},
     ]
     for h in history[-4:]:
         messages.append({"role": h["role"], "content": h["content"]})
@@ -141,10 +147,11 @@ def generate_chat_answer(user_question, history):
         return "API error. Here is info from notes:\n\n" + ctx
 
 
-# ---------------------------------------------------
-# Helper: lot status for all lots
-# ---------------------------------------------------
+# ===================================================
+# CORE HELPERS
+# ===================================================
 def compute_lot_status(month, dow, hour, max_temp, precip, gust):
+    """Return occupancy & near-full probability for every lot."""
     if not MODELS_OK:
         return pd.DataFrame()
 
@@ -159,6 +166,7 @@ def compute_lot_status(month, dow, hour, max_temp, precip, gust):
 
     is_weekend = 1 if dow in [5, 6] else 0
     base = {f: 0 for f in FEATURES}
+
     if "Month" in base:
         base["Month"] = month
     if "DayOfWeek" in base:
@@ -179,66 +187,72 @@ def compute_lot_status(month, dow, hour, max_temp, precip, gust):
         row = base.copy()
         if lf in row:
             row[lf] = 1
+
         x = np.array([row[f] for f in FEATURES]).reshape(1, -1)
         x_scaled = scaler.transform(x)
+
         occ = best_xgb_reg.predict(x_scaled)[0]
         prob = best_lgbm_cls.predict_proba(x_scaled)[0, 1]
+
         if prob > 0.7:
             status = "🟥 High risk"
         elif prob > 0.4:
             status = "🟧 Busy"
         else:
             status = "🟩 OK"
+
         rows.append(
             {
                 "Lot": name,
                 "Predicted occupancy": occ,
-                "Probability full": prob,
+                "Probability full (>90%)": prob,
                 "Status": status,
             }
         )
+
     return pd.DataFrame(rows).sort_values("Lot")
 
 
-# ---------------------------------------------------
+# ===================================================
 # SIDEBAR NAV
-# ---------------------------------------------------
+# ===================================================
 st.sidebar.title("Banff Parking")
+st.sidebar.caption("ML forecasting – 2025 tourist season")
+
 page = st.sidebar.radio(
     "Pages",
     [
         "🏠 Dashboard",
-        "🎯 Make Prediction",
-        "📊 Lot Status Overview",
-        "🔍 XAI",
-        "💬 Chat",
+        "🎯 Forecast single lot",
+        "📊 Compare all lots",
+        "🔍 XAI – why",
+        "💬 Project Q&A",
     ],
 )
 
-# Global error banner if models not loaded
+# Global model-error banner
 if not MODELS_OK:
     st.error(
         "Models not loaded.\n\n"
-        f"`{MODEL_ERROR}`\n\n"
-        "Check that all .pkl/.npy files are in the repo and `lightgbm` "
-        "is in requirements.txt."
+        f"Details: `{MODEL_ERROR}`\n\n"
+        "Check *.pkl / *.npy files and `lightgbm` in requirements.txt."
     )
 
-# ---------------------------------------------------
-# PAGE: DASHBOARD
-# ---------------------------------------------------
+# ===================================================
+# PAGE 1 – DASHBOARD (problem statement focus)
+# ===================================================
 if page == "🏠 Dashboard":
-    st.title("🏠 Banff Parking – Dashboard")
-    st.write("Pick a date & hour, see which lots are most at risk.")
+    st.title("🏠 Banff Parking – Problem Focus")
 
+    # --- Controls on TOP (calendar + sliders) ---
     c1, c2, c3 = st.columns(3)
     with c1:
-        chosen_date = st.date_input(
-            "📅 Choose date (tourist season)",
+        selected_date = st.date_input(
+            "📅 Date (2025 tourist season)",
             value=date(2025, 7, 15),
         )
     with c2:
-        hour = st.slider("🕒 Hour", 0, 23, 14)
+        hour = st.slider("🕒 Hour of day", 0, 23, 14)
     with c3:
         max_temp = st.slider("🌡 Max Temp (°C)", -10.0, 35.0, 22.0)
 
@@ -248,23 +262,40 @@ if page == "🏠 Dashboard":
     with c5:
         gust = st.slider("💨 Max Gust (km/h)", 0.0, 80.0, 12.0)
 
-    month = chosen_date.month
-    dow = chosen_date.weekday()
+    # Derived time features
+    month = selected_date.month          # 2025 trend encoded via month
+    dow = selected_date.weekday()       # 0=Mon … 6=Sun
 
+    # Short problem statement block
+    st.markdown(
+        """
+        **Key questions**
+
+        1. Which factors – **time of day, day of week, weather, 2025 month** – best predict parking demand?  
+        2. Can we predict, **hour by hour**, when a specific lot is **near capacity (>90% full)**?
+        """
+    )
+
+    st.markdown("---")
+
+    # --- Use models to show quick snapshot for chosen hour ---
     if MODELS_OK:
         df = compute_lot_status(month, dow, hour, max_temp, precip, gust)
+
         if df.empty:
-            st.warning("No lot features starting with 'Unit_'.")
+            st.warning("No lot features starting with `Unit_` in FEATURES.")
         else:
-            top3 = df.sort_values("Probability full", ascending=False).head(3)
-            colA, colB = st.columns([1.3, 1])
+            # top 3 highest probability full
+            top3 = df.sort_values("Probability full (>90%)", ascending=False).head(3)
+
+            colA, colB = st.columns([1.5, 1])
             with colA:
-                st.subheader("Top 3 high-risk lots")
+                st.subheader("Top 3 lots most likely to be >90% full")
                 st.dataframe(
                     top3.style.format(
                         {
                             "Predicted occupancy": "{:.1f}",
-                            "Probability full": "{:.1%}",
+                            "Probability full (>90%)": "{:.1%}",
                         }
                     ),
                     use_container_width=True,
@@ -273,73 +304,71 @@ if page == "🏠 Dashboard":
                 high = (df["Status"] == "🟥 High risk").sum()
                 busy = (df["Status"] == "🟧 Busy").sum()
                 ok = (df["Status"] == "🟩 OK").sum()
+
                 st.metric("🟥 High-risk lots", high)
                 st.metric("🟧 Busy lots", busy)
-                st.metric("🟩 OK lots", ok)
+                st.metric("🟩 Comfortable lots", ok)
 
+    # --- Power BI: 2025 trend view ---
     st.markdown("---")
-    st.subheader("Power BI overview (optional)")
+    st.subheader("📈 Power BI – 2025 Parking Trends")
+
     if POWERBI_EMBED_URL:
+        # Your SharePoint/Power BI frame
         components.iframe(POWERBI_EMBED_URL, height=420)
     else:
-        st.info("Set POWERBI_EMBED_URL in code to show your Power BI dashboard here.")
+        st.info("Add your Power BI public URL to POWERBI_EMBED_URL in the code.")
 
-# ---------------------------------------------------
-# PAGE: MAKE PREDICTION
-# ---------------------------------------------------
-elif page == "🎯 Make Prediction":
-    st.title("🎯 Make Prediction – Single Lot")
+# ===================================================
+# PAGE 2 – FORECAST SINGLE LOT
+# ===================================================
+elif page == "🎯 Forecast single lot":
+    st.title("🎯 Hour-by-Hour Forecast – Single Lot")
 
     if not MODELS_OK:
         st.info("Models not loaded.")
     else:
+        # Lot options
         lot_feats = [f for f in FEATURES if f.startswith("Unit_")]
         lot_names = [lf.replace("Unit_", "").replace("_", " ") for lf in lot_feats]
+
         if lot_feats:
             pairs = sorted(zip(lot_feats, lot_names), key=lambda x: x[1])
             lot_feats, lot_names = zip(*pairs)
             lot_feats, lot_names = list(lot_feats), list(lot_names)
 
         if not lot_feats:
-            st.error("No lot features starting with 'Unit_'.")
+            st.error("No lot indicator features (starting with `Unit_`).")
         else:
-            col0, col1, col2 = st.columns(3)
-            with col0:
-                chosen_date = st.date_input(
+            # Controls at the top
+            c0, c1, c2 = st.columns(3)
+            with c0:
+                selected_date = st.date_input(
                     "📅 Date",
-                    value=date(2025, 7, 15),
-                    key="pred_date",
+                    value=date(2025, 7, 18),
+                    key="single_date",
                 )
-            with col1:
-                hour = st.slider("🕒 Hour", 0, 23, 14, key="pred_hour")
-            with col2:
-                lot_label = st.selectbox("🚗 Lot", lot_names)
+            with c1:
+                hour = st.slider("🕒 Hour", 0, 23, 14, key="single_hour")
+            with c2:
+                lot_label = st.selectbox("🚗 Parking lot", lot_names)
                 lot_feat = lot_feats[lot_names.index(lot_label)]
 
-            dow = chosen_date.weekday()
-            month = chosen_date.month
+            dow = selected_date.weekday()
+            month = selected_date.month
 
-            scenario_opt = {
-                "Custom": None,
-                "Sunny weekend": {"temp": 24.0, "precip": 0.0, "gust": 10.0},
-                "Rainy weekday": {"temp": 15.0, "precip": 5.0, "gust": 25.0},
-            }
-            scen = st.selectbox("Scenario", list(scenario_opt.keys()), index=1)
-
-            defaults = {"temp": 22.0, "precip": 0.5, "gust": 12.0}
-            if scenario_opt[scen] is not None:
-                defaults.update(scenario_opt[scen])
-
+            # Weather sliders
             c3, c4, c5 = st.columns(3)
             with c3:
-                max_temp = st.slider("🌡 Max Temp (°C)", -20.0, 40.0, float(defaults["temp"]))
+                max_temp = st.slider("🌡 Max Temp (°C)", -20.0, 40.0, 22.0)
             with c4:
-                precip = st.slider("☔ Total Precip (mm)", 0.0, 30.0, float(defaults["precip"]))
+                precip = st.slider("☔ Total Precip (mm)", 0.0, 30.0, 0.5)
             with c5:
-                gust = st.slider("💨 Max Gust (km/h)", 0.0, 100.0, float(defaults["gust"]))
+                gust = st.slider("💨 Max Gust (km/h)", 0.0, 100.0, 12.0)
 
             is_weekend = 1 if dow in [5, 6] else 0
             base = {f: 0 for f in FEATURES}
+
             if "Month" in base:
                 base["Month"] = month
             if "DayOfWeek" in base:
@@ -360,41 +389,41 @@ elif page == "🎯 Make Prediction":
             x = np.array([base[f] for f in FEATURES]).reshape(1, -1)
             x_scaled = scaler.transform(x)
 
-            if st.button("Predict"):
+            if st.button("Predict demand for this hour"):
                 occ = best_xgb_reg.predict(x_scaled)[0]
                 prob = best_lgbm_cls.predict_proba(x_scaled)[0, 1]
 
-                cA, cB = st.columns(2)
-                with cA:
+                colA, colB = st.columns(2)
+                with colA:
                     st.metric("Predicted occupancy (vehicles)", f"{occ:.1f}")
-                with cB:
-                    st.metric("Probability near full", f"{prob:.1%}")
+                with colB:
+                    st.metric("Chance lot is >90% full", f"{prob:.1%}")
 
                 if prob > 0.7:
-                    st.warning("High risk this lot is full at this time.")
+                    st.warning("High risk this lot is near capacity at this hour.")
                 elif prob > 0.4:
-                    st.info("Moderate risk – keep an eye on this lot.")
+                    st.info("Medium risk – lot may feel busy.")
                 else:
                     st.success("Low risk – lot should be comfortable.")
 
-# ---------------------------------------------------
-# PAGE: LOT STATUS OVERVIEW
-# ---------------------------------------------------
-elif page == "📊 Lot Status Overview":
-    st.title("📊 Lot Status – All Lots")
+# ===================================================
+# PAGE 3 – COMPARE ALL LOTS
+# ===================================================
+elif page == "📊 Compare all lots":
+    st.title("📊 Compare All Lots – Same Hour")
 
     if not MODELS_OK:
         st.info("Models not loaded.")
     else:
         c1, c2, c3 = st.columns(3)
         with c1:
-            chosen_date = st.date_input(
+            selected_date = st.date_input(
                 "📅 Date",
-                value=date(2025, 7, 15),
-                key="status_date",
+                value=date(2025, 7, 25),
+                key="compare_date",
             )
         with c2:
-            hour = st.slider("🕒 Hour", 0, 23, 14, key="status_hour")
+            hour = st.slider("🕒 Hour", 0, 23, 14, key="compare_hour")
         with c3:
             max_temp = st.slider("🌡 Max Temp (°C)", -20.0, 40.0, 22.0)
 
@@ -404,13 +433,14 @@ elif page == "📊 Lot Status Overview":
         with c5:
             gust = st.slider("💨 Max Gust (km/h)", 0.0, 100.0, 12.0)
 
-        month = chosen_date.month
-        dow = chosen_date.weekday()
+        month = selected_date.month
+        dow = selected_date.weekday()
 
         if st.button("Show lot status"):
             df = compute_lot_status(month, dow, hour, max_temp, precip, gust)
+
             if df.empty:
-                st.warning("Could not compute lot status.")
+                st.warning("Could not compute lot status – check feature names.")
             else:
                 def row_style(row):
                     if "High risk" in row["Status"]:
@@ -423,33 +453,32 @@ elif page == "📊 Lot Status Overview":
                     df.style.format(
                         {
                             "Predicted occupancy": "{:.1f}",
-                            "Probability full": "{:.1%}",
+                            "Probability full (>90%)": "{:.1%}",
                         }
                     ).apply(row_style, axis=1)
                 )
                 st.dataframe(styled, use_container_width=True)
 
-# ---------------------------------------------------
-# PAGE: XAI
-# ---------------------------------------------------
-elif page == "🔍 XAI":
-    st.title("🔍 XAI – Model Insight")
-    st.write("SHAP, partial dependence, and residuals for the regression model.")
+# ===================================================
+# PAGE 4 – XAI
+# ===================================================
+elif page == "🔍 XAI – why":
+    st.title("🔍 XAI – Why the Model Thinks This")
 
     if not MODELS_OK:
         st.info("Models not loaded.")
     else:
-        # SHAP summary + bar
+        # SHAP
         try:
             explainer = shap.TreeExplainer(best_xgb_reg)
             shap_vals = explainer.shap_values(X_test_scaled)
 
-            st.subheader("SHAP summary")
+            st.subheader("SHAP summary – main drivers")
             fig1, _ = plt.subplots()
             shap.summary_plot(shap_vals, X_test_scaled, feature_names=FEATURES, show=False)
             st.pyplot(fig1)
 
-            st.subheader("SHAP feature importance")
+            st.subheader("SHAP bar – overall importance")
             fig2, _ = plt.subplots()
             shap.summary_plot(
                 shap_vals,
@@ -462,10 +491,10 @@ elif page == "🔍 XAI":
         except Exception as e:
             st.error(f"SHAP error: {e}")
 
-        # PDP
-        pd_feats = [f for f in ["Max Temp (°C)", "Month", "Hour"] if f in FEATURES]
+        # PDP for time & weather
+        pd_feats = [f for f in ["Hour", "DayOfWeek", "Month", "Max Temp (°C)"] if f in FEATURES]
         if pd_feats:
-            st.subheader("Partial dependence")
+            st.subheader("Partial dependence – time & weather")
             idxs = [FEATURES.index(f) for f in pd_feats]
             fig3, ax3 = plt.subplots(figsize=(9, 4))
             PartialDependenceDisplay.from_estimator(
@@ -477,27 +506,31 @@ elif page == "🔍 XAI":
             )
             st.pyplot(fig3)
 
-        # Residual plot
+        # Residuals
         try:
-            st.subheader("Residuals")
+            st.subheader("Residuals – forecast vs actual")
             y_pred = best_xgb_reg.predict(X_test_scaled)
             residuals = y_reg_test - y_pred
+
             fig4, ax4 = plt.subplots()
             ax4.scatter(y_pred, residuals, alpha=0.3)
             ax4.axhline(0, color="red", linestyle="--")
-            ax4.set_xlabel("Predicted")
-            ax4.set_ylabel("Actual - Predicted")
+            ax4.set_xlabel("Predicted occupancy")
+            ax4.set_ylabel("Actual − Predicted")
             st.pyplot(fig4)
         except Exception as e:
             st.error(f"Residual error: {e}")
 
-# ---------------------------------------------------
-# PAGE: CHAT
-# ---------------------------------------------------
-elif page == "💬 Chat":
-    st.title("💬 Banff Parking Chat")
+# ===================================================
+# PAGE 5 – CHAT
+# ===================================================
+elif page == "💬 Project Q&A":
+    st.title("💬 Project Q&A – Banff Parking")
 
-    st.write("Ask questions about this project. The bot uses your `banff_knowledge.txt`.")
+    st.caption(
+        "Ask about factors (time, day, weather, 2025 patterns) or how the model "
+        "predicts near-full (>90%) parking lots."
+    )
 
     if "rag_chat_history" not in st.session_state:
         st.session_state.rag_chat_history = []

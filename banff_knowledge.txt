@@ -1,0 +1,5 @@
+Bear Street Parkade tends to reach high occupancy between 11 AM and 3 PM on summer weekends.
+Central Park lot rarely reaches full capacity except during long weekends.
+Rainy days reduce overall parking occupancy across most Banff lots.
+The classification model predicts near-full status using hour, day of week, temperature, precipitation, and lagged occupancy.
+The regression model predicts hourly occupancy count for each lot.

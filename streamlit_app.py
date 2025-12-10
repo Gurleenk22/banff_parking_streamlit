@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import joblib
-from datetime import time
+from datetime import time, date, timedelta, datetime
 from pathlib import Path
 from typing import List, Dict
 
@@ -23,7 +23,6 @@ st.markdown(
             background: linear-gradient(135deg, #e0f4ff, #fce4ff, #fff5e6);
         }
 
-        /* Remove default padding a bit */
         .block-container {
             padding-top: 1.5rem;
             padding-bottom: 1.5rem;
@@ -98,7 +97,7 @@ st.markdown(
             box-shadow: 0 15px 35px rgba(148, 163, 184, 0.9);
         }
 
-        /* Small page chips on top of inner pages */
+        /* Page chips on top of inner pages */
         .page-chip {
             display: inline-block;
             padding: 0.25rem 0.8rem;
@@ -268,7 +267,6 @@ def compute_shap_global(data: pd.DataFrame,
     idx = np.random.choice(len(data), size=sample_size, replace=False)
     sample = data.iloc[idx].copy()
 
-    # Build feature matrix from sample
     rows = []
     for _, r in sample.iterrows():
         rows.append(build_feature_vector(r, feature_list).iloc[0])
@@ -287,6 +285,12 @@ def compute_shap_global(data: pd.DataFrame,
 data = load_data()
 reg_model, cls_model, scaler, feature_list = load_models_and_features()
 
+# Precompute capacity per lot for future forecasts
+if "Capacity" in data.columns:
+    capacity_map = data.groupby("Unit")["Capacity"].max().to_dict()
+else:
+    capacity_map = {}
+
 # ---------------------------------------------------
 # SIMPLE PAGE ROUTING (HOME + INNER PAGES)
 # ---------------------------------------------------
@@ -302,7 +306,6 @@ def goto(page_name: str):
 # HOME / LANDING PAGE – PATH FINDERS ONLY
 # ---------------------------------------------------
 if st.session_state["page"] == "home":
-    # Big centered title + subtitle
     st.markdown('<div class="app-header">PATH FINDERS</div>', unsafe_allow_html=True)
     st.markdown(
         '<div class="app-subtitle">'
@@ -311,12 +314,10 @@ if st.session_state["page"] == "home":
         unsafe_allow_html=True
     )
 
-    # Centered glass card with navigation buttons
     col_center = st.columns([0.15, 0.7, 0.15])[1]
     with col_center:
         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 
-        # Quick stats row
         c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown('<div class="metric-title">Records</div>', unsafe_allow_html=True)
@@ -366,137 +367,322 @@ if st.session_state["page"] == "home":
         st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------
-# INNER PAGE: FORECAST DASHBOARD
+# INNER PAGE: FORECAST DASHBOARD (HISTORICAL + FUTURE)
 # ---------------------------------------------------
 elif st.session_state["page"] == "forecast":
     st.markdown('<span class="page-chip">Forecast</span>', unsafe_allow_html=True)
     st.markdown('<div class="page-title">Hourly Parking Forecast</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="page-subtitle">Select lot, date, and time to predict occupancy and near-full risk.</div>',
+        '<div class="page-subtitle">Historical predictions from data, plus future what-if forecasts.</div>',
         unsafe_allow_html=True
     )
     st.button("← Back to Path Finders", on_click=lambda: goto("home"))
 
-    # Glass container
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    c1, c2, c3 = st.columns(3)
-    with c1:
+
+    # Lot + forecast type selector
+    top_left, top_right = st.columns([1.5, 1])
+    with top_left:
         pred_unit = st.selectbox(
             "Parking lot",
             sorted(data["Unit"].unique()),
             key="pred_unit"
         )
-
-    unit_df = data[data["Unit"] == pred_unit].copy()
-    if "Timestamp" in unit_df.columns:
-        available_dates = sorted(unit_df["Timestamp"].dt.date.unique())
-    else:
-        available_dates = []
-
-    with c2:
-        if available_dates:
-            pred_date = st.date_input(
-                "Date",
-                value=available_dates[0],
-                min_value=min(available_dates),
-                max_value=max(available_dates),
-                key="pred_date"
-            )
-        else:
-            pred_date = None
-
-    with c3:
-        pred_time = st.time_input(
-            "Time (hourly)",
-            value=time(12, 0),
-            step=3600,
-            key="pred_time"
+    with top_right:
+        forecast_mode = st.radio(
+            "Forecast type",
+            ["Historical (from data)", "Future (no data yet)"],
+            horizontal=True,
+            key="forecast_mode"
         )
 
-    if not available_dates or pred_date is None:
-        st.warning("No data available for this lot.")
-        st.markdown('</div>', unsafe_allow_html=True)
-    else:
-        selected_hour = pred_time.hour
-        filtered = unit_df[unit_df["Timestamp"].dt.date == pred_date]
-        row_match = filtered[filtered["Hour"] == selected_hour]
-
-        if row_match.empty:
-            st.info("No exact hour found for this date. Try a different time.")
+    # ---------------- HISTORICAL FORECAST ----------------
+    if forecast_mode.startswith("Historical"):
+        unit_df = data[data["Unit"] == pred_unit].copy()
+        if "Timestamp" not in unit_df.columns:
+            st.warning("Timestamp column missing in data.")
             st.markdown('</div>', unsafe_allow_html=True)
         else:
-            row = row_match.iloc[0]
+            available_dates = sorted(unit_df["Timestamp"].dt.date.unique())
 
-            if all(col in row.index for col in ["Max Temp (°C)", "Min Temp (°C)", "Total Precip (mm)", "Spd of Max Gust (km/h)"]):
-                weather_str = (
-                    f"{row['Max Temp (°C)']}°C / {row['Min Temp (°C)']}°C • "
-                    f"Precip: {row['Total Precip (mm)']} mm • "
-                    f"Wind gust: {row['Spd of Max Gust (km/h)']} km/h"
+            c1, c2 = st.columns(2)
+            with c1:
+                if available_dates:
+                    pred_date = st.date_input(
+                        "Date",
+                        value=available_dates[0],
+                        min_value=min(available_dates),
+                        max_value=max(available_dates),
+                        key="pred_date_hist"
+                    )
+                else:
+                    pred_date = None
+            with c2:
+                pred_time_hist = st.time_input(
+                    "Time (hourly)",
+                    value=time(12, 0),
+                    step=3600,
+                    key="pred_time_hist"
                 )
+
+            if not available_dates or pred_date is None:
+                st.warning("No historical data available for this lot.")
             else:
-                weather_str = "Weather not available"
+                selected_hour = pred_time_hist.hour
+                filtered = unit_df[unit_df["Timestamp"].dt.date == pred_date]
+                row_match = filtered[filtered["Hour"] == selected_hour]
+
+                if row_match.empty:
+                    st.info("No exact hour found for this date. Try a different time.")
+                else:
+                    row = row_match.iloc[0]
+
+                    if all(col in row.index for col in ["Max Temp (°C)", "Min Temp (°C)",
+                                                        "Total Precip (mm)", "Spd of Max Gust (km/h)"]):
+                        weather_str = (
+                            f"{row['Max Temp (°C)']}°C / {row['Min Temp (°C)']}°C • "
+                            f"Precip: {row['Total Precip (mm)']} mm • "
+                            f"Wind gust: {row['Spd of Max Gust (km/h)']} km/h"
+                        )
+                    else:
+                        weather_str = "Weather not available"
+
+                    st.markdown(
+                        f"**Historical scenario:** {pred_unit} • {pred_date} • "
+                        f"{selected_hour:02d}:00 • {weather_str}"
+                    )
+
+                    run_hist = st.button("Run historical forecast", key="run_forecast_hist")
+
+                    if run_hist:
+                        try:
+                            y_pred, full_prob, label = make_predictions(
+                                row, reg_model, cls_model, scaler, feature_list
+                            )
+                            capacity = row.get("Capacity", 0)
+                            if capacity > 0:
+                                pred_percent = float(np.clip(y_pred / capacity, 0, 1))
+                            else:
+                                pred_percent = 0.0
+
+                            level, msg = congestion_level(pred_percent)
+                            near_capacity_flag = pred_percent >= 0.90
+
+                            m1, m2, m3, m4 = st.columns(4)
+
+                            with m1:
+                                st.markdown('<div class="metric-title">Predicted occupancy</div>',
+                                            unsafe_allow_html=True)
+                                st.markdown(
+                                    f'<div class="metric-value">{y_pred:.0f} / {int(capacity)}</div>',
+                                    unsafe_allow_html=True
+                                )
+                                st.markdown(
+                                    f'<span class="metric-badge">{pred_percent*100:.1f}% full</span>',
+                                    unsafe_allow_html=True
+                                )
+
+                            with m2:
+                                st.markdown('<div class="metric-title">Near-full probability</div>',
+                                            unsafe_allow_html=True)
+                                st.markdown(
+                                    f'<div class="metric-value">{full_prob*100:.1f}%</div>',
+                                    unsafe_allow_html=True
+                                )
+                                st.markdown(
+                                    '<span class="metric-badge">Classifier output</span>',
+                                    unsafe_allow_html=True
+                                )
+
+                            with m3:
+                                st.markdown('<div class="metric-title">Congestion level</div>',
+                                            unsafe_allow_html=True)
+                                st.markdown(
+                                    f'<div class="metric-value">{level}</div>',
+                                    unsafe_allow_html=True
+                                )
+                                st.markdown(
+                                    f'<span class="metric-badge">{msg}</span>',
+                                    unsafe_allow_html=True
+                                )
+
+                            with m4:
+                                st.markdown('<div class="metric-title">Near capacity? (> 90%)</div>',
+                                            unsafe_allow_html=True)
+                                ans = "YES" if near_capacity_flag else "NO"
+                                col = "#16a34a" if not near_capacity_flag else "#fb923c"
+                                st.markdown(
+                                    f'<div class="metric-value" style="color:{col};">{ans}</div>',
+                                    unsafe_allow_html=True
+                                )
+                                st.markdown(
+                                    '<span class="metric-badge">Threshold at 90%</span>',
+                                    unsafe_allow_html=True
+                                )
+
+                            # Show actual
+                            if all(col in row.index for col in ["Occupancy", "Capacity",
+                                                                "Percent_Occupancy", "Is_Full"]):
+                                st.markdown("**Actual (same hour):**")
+                                st.markdown(
+                                    f"- {row['Occupancy']} / {int(row['Capacity'])} "
+                                    f"({row['Percent_Occupancy']*100:.1f}%)  \n"
+                                    f"- Is_Full label: {row['Is_Full']}"
+                                )
+
+                        except Exception as e:
+                            st.error(f"Prediction error: {e}")
+
+                    st.markdown("---")
+                    st.markdown("**Historical hourly forecast for this day**")
+                    day_df = filtered.copy()
+                    if not day_df.empty:
+                        preds = []
+                        for _, r in day_df.iterrows():
+                            try:
+                                yp, _, _ = make_predictions(
+                                    r, reg_model, cls_model, scaler, feature_list
+                                )
+                                cap = r.get("Capacity", 0)
+                                if cap > 0:
+                                    preds.append(min(max(yp / cap, 0), 1))
+                                else:
+                                    preds.append(0.0)
+                            except Exception:
+                                preds.append(np.nan)
+
+                        fig2, ax2 = plt.subplots()
+                        ax2.plot(day_df["Hour"], np.array(preds) * 100, marker="o")
+                        ax2.set_xlabel("Hour")
+                        ax2.set_ylabel("Predicted occupancy (%)")
+                        ax2.set_title(f"Historical forecast – {pred_unit} on {pred_date}")
+                        ax2.set_xticks(range(0, 24, 2))
+                        ax2.grid(True, linestyle="--", linewidth=0.4)
+                        st.pyplot(fig2)
+                    else:
+                        st.info("No rows for this day to plot.")
+
+    # ---------------- FUTURE FORECAST ----------------
+    else:
+        # Date range for future = from last date in data + 1 up to +365 days
+        if "Timestamp" not in data.columns:
+            st.warning("Timestamp column missing in data – cannot compute future range.")
+            st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            last_date = data["Timestamp"].max().date()
+            min_future = last_date + timedelta(days=1)
+            max_future = last_date + timedelta(days=365)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                future_date = st.date_input(
+                    "Future date",
+                    value=min_future,
+                    min_value=min_future,
+                    max_value=max_future,
+                    key="future_date"
+                )
+            with c2:
+                future_time = st.time_input(
+                    "Time (hourly)",
+                    value=time(12, 0),
+                    step=3600,
+                    key="future_time"
+                )
+
+            st.markdown("**Weather scenario (what-if)**")
+            w1, w2 = st.columns(2)
+            with w1:
+                max_temp = st.slider("Max Temp (°C)", -30.0, 35.0, 20.0, 0.5)
+                min_temp = st.slider("Min Temp (°C)", -35.0, 25.0, 10.0, 0.5)
+            with w2:
+                precip = st.slider("Total Precip (mm)", 0.0, 30.0, 0.0, 0.5)
+                gust = st.slider("Spd of Max Gust (km/h)", 0.0, 90.0, 15.0, 1.0)
 
             st.markdown(
-                f"**Scenario:** {pred_unit} • {pred_date} • {selected_hour:02d}:00 • {weather_str}"
+                f"**Future scenario:** {pred_unit} • {future_date} • {future_time.strftime('%H:%M')} "
+                f"• {max_temp}°C / {min_temp}°C • Precip {precip} mm"
             )
 
-            run = st.button("Run forecast", key="run_forecast")
+            run_future = st.button("Run future forecast", key="run_forecast_future")
 
-            if run:
+            # Capacity from history
+            cap_future = capacity_map.get(pred_unit, 100)
+
+            if run_future:
                 try:
-                    y_pred, full_prob, label = make_predictions(
-                        row, reg_model, cls_model, scaler, feature_list
-                    )
-                    capacity = row.get("Capacity", 0)
-                    if capacity > 0:
-                        pred_percent = float(np.clip(y_pred / capacity, 0, 1))
-                    else:
-                        pred_percent = 0.0
+                    ts = datetime.combine(future_date, future_time)
 
-                    level, msg = congestion_level(pred_percent)
-                    near_capacity_flag = pred_percent >= 0.90
+                    # Build synthetic future row
+                    row_future = pd.Series(dtype="float64")
+                    row_future["Unit"] = pred_unit
+                    row_future["Timestamp"] = ts
+                    row_future["Hour"] = ts.hour
+                    row_future["DayOfWeek"] = ts.weekday()
+                    row_future["Month"] = ts.month
+                    row_future["Max Temp (°C)"] = max_temp
+                    row_future["Min Temp (°C)"] = min_temp
+                    row_future["Total Precip (mm)"] = precip
+                    row_future["Spd of Max Gust (km/h)"] = gust
+                    row_future["Capacity"] = cap_future  # used for % only
+
+                    y_pred_f, full_prob_f, label_f = make_predictions(
+                        row_future, reg_model, cls_model, scaler, feature_list
+                    )
+
+                    if cap_future > 0:
+                        pred_percent_f = float(np.clip(y_pred_f / cap_future, 0, 1))
+                    else:
+                        pred_percent_f = 0.0
+
+                    level_f, msg_f = congestion_level(pred_percent_f)
+                    near_capacity_flag_f = pred_percent_f >= 0.90
 
                     m1, m2, m3, m4 = st.columns(4)
 
                     with m1:
-                        st.markdown('<div class="metric-title">Predicted occupancy</div>', unsafe_allow_html=True)
+                        st.markdown('<div class="metric-title">Predicted occupancy</div>',
+                                    unsafe_allow_html=True)
                         st.markdown(
-                            f'<div class="metric-value">{y_pred:.0f} / {int(capacity)}</div>',
+                            f'<div class="metric-value">{y_pred_f:.0f} / {int(cap_future)}</div>',
                             unsafe_allow_html=True
                         )
                         st.markdown(
-                            f'<span class="metric-badge">{pred_percent*100:.1f}% full</span>',
+                            f'<span class="metric-badge">{pred_percent_f*100:.1f}% full</span>',
                             unsafe_allow_html=True
                         )
 
                     with m2:
-                        st.markdown('<div class="metric-title">Near-full probability</div>', unsafe_allow_html=True)
+                        st.markdown('<div class="metric-title">Near-full probability</div>',
+                                    unsafe_allow_html=True)
                         st.markdown(
-                            f'<div class="metric-value">{full_prob*100:.1f}%</div>',
+                            f'<div class="metric-value">{full_prob_f*100:.1f}%</div>',
                             unsafe_allow_html=True
                         )
                         st.markdown(
-                            '<span class="metric-badge">Model: classifier</span>',
+                            '<span class="metric-badge">Classifier output</span>',
                             unsafe_allow_html=True
                         )
 
                     with m3:
-                        st.markdown('<div class="metric-title">Congestion level</div>', unsafe_allow_html=True)
+                        st.markdown('<div class="metric-title">Congestion level</div>',
+                                    unsafe_allow_html=True)
                         st.markdown(
-                            f'<div class="metric-value">{level}</div>',
+                            f'<div class="metric-value">{level_f}</div>',
                             unsafe_allow_html=True
                         )
                         st.markdown(
-                            f'<span class="metric-badge">{msg}</span>',
+                            f'<span class="metric-badge">{msg_f}</span>',
                             unsafe_allow_html=True
                         )
 
                     with m4:
-                        st.markdown('<div class="metric-title">Near capacity? (&gt; 90%)</div>', unsafe_allow_html=True)
-                        ans = "YES" if near_capacity_flag else "NO"
-                        col = "#16a34a" if not near_capacity_flag else "#fb923c"
+                        st.markdown('<div class="metric-title">Near capacity? (> 90%)</div>',
+                                    unsafe_allow_html=True)
+                        ans_f = "YES" if near_capacity_flag_f else "NO"
+                        col_f = "#16a34a" if not near_capacity_flag_f else "#fb923c"
                         st.markdown(
-                            f'<div class="metric-value" style="color:{col};">{ans}</div>',
+                            f'<div class="metric-value" style="color:{col_f};">{ans_f}</div>',
                             unsafe_allow_html=True
                         )
                         st.markdown(
@@ -505,40 +691,49 @@ elif st.session_state["page"] == "forecast":
                         )
 
                 except Exception as e:
-                    st.error(f"Prediction error: {e}")
+                    st.error(f"Future forecast error: {e}")
 
             st.markdown("---")
+            st.markdown("**Future hourly forecast for this date**")
 
-            # Hour-by-hour forecast curve for the same day
-            st.markdown("**Hourly forecast for selected day**")
-            day_df = filtered.copy()
-            if not day_df.empty:
-                preds = []
-                for _, r in day_df.iterrows():
-                    try:
-                        yp, _, _ = make_predictions(
-                            r, reg_model, cls_model, scaler, feature_list
-                        )
-                        cap = r.get("Capacity", 0)
-                        if cap > 0:
-                            preds.append(min(max(yp / cap, 0), 1))
-                        else:
-                            preds.append(0.0)
-                    except Exception:
-                        preds.append(np.nan)
+            # Build 24-hour synthetic day with same weather, every hour
+            hours = list(range(24))
+            preds_day = []
+            for h in hours:
+                try:
+                    ts_h = datetime.combine(future_date, time(h, 0))
+                    row_h = pd.Series(dtype="float64")
+                    row_h["Unit"] = pred_unit
+                    row_h["Timestamp"] = ts_h
+                    row_h["Hour"] = h
+                    row_h["DayOfWeek"] = ts_h.weekday()
+                    row_h["Month"] = ts_h.month
+                    row_h["Max Temp (°C)"] = max_temp
+                    row_h["Min Temp (°C)"] = min_temp
+                    row_h["Total Precip (mm)"] = precip
+                    row_h["Spd of Max Gust (km/h)"] = gust
+                    row_h["Capacity"] = cap_future
 
-                fig2, ax2 = plt.subplots()
-                ax2.plot(day_df["Hour"], np.array(preds) * 100, marker="o")
-                ax2.set_xlabel("Hour")
-                ax2.set_ylabel("Predicted occupancy (%)")
-                ax2.set_title(f"Forecast – {pred_unit} on {pred_date}")
-                ax2.set_xticks(range(0, 24, 2))
-                ax2.grid(True, linestyle="--", linewidth=0.4)
-                st.pyplot(fig2)
-            else:
-                st.info("No rows for this day to plot.")
+                    yp_h, _, _ = make_predictions(
+                        row_h, reg_model, cls_model, scaler, feature_list
+                    )
+                    if cap_future > 0:
+                        preds_day.append(min(max(yp_h / cap_future, 0), 1))
+                    else:
+                        preds_day.append(0.0)
+                except Exception:
+                    preds_day.append(np.nan)
 
-            st.markdown('</div>', unsafe_allow_html=True)
+            figf, axf = plt.subplots()
+            axf.plot(hours, np.array(preds_day) * 100, marker="o")
+            axf.set_xlabel("Hour")
+            axf.set_ylabel("Predicted occupancy (%)")
+            axf.set_title(f"Future forecast – {pred_unit} on {future_date}")
+            axf.set_xticks(range(0, 24, 2))
+            axf.grid(True, linestyle="--", linewidth=0.4)
+            st.pyplot(figf)
+
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------
 # INNER PAGE: XAI INSIGHTS
@@ -649,7 +844,6 @@ elif st.session_state["page"] == "data":
 
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
 
-    # Top metrics
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.markdown('<div class="metric-title">Records</div>', unsafe_allow_html=True)

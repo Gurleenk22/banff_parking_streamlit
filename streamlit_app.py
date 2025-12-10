@@ -11,7 +11,7 @@ from typing import List, Dict
 # PAGE CONFIG + STYLING
 # ---------------------------------------------------
 st.set_page_config(
-    page_title="Banff Parking – Research Questions Dashboard",
+    page_title="Banff Smart Parking – ML & XAI Dashboard",
     layout="wide"
 )
 
@@ -23,9 +23,9 @@ st.markdown(
             color: #e5e7eb;
         }
         .app-header {
-            font-size: 2rem;
-            font-weight: 700;
-            margin-bottom: 0.1rem;
+            font-size: 2.3rem;
+            font-weight: 750;
+            margin-bottom: 0.2rem;
         }
         .app-subtitle {
             color: #9ca3af;
@@ -34,7 +34,7 @@ st.markdown(
         }
         .card {
             padding: 1rem 1.25rem;
-            border-radius: 0.85rem;
+            border-radius: 0.9rem;
             background: radial-gradient(circle at top left, #1d283a, #020617);
             border: 1px solid rgba(148, 163, 184, 0.3);
             box-shadow: 0 18px 45px rgba(15, 23, 42, 0.7);
@@ -82,10 +82,7 @@ st.markdown(
 # ---------------------------------------------------
 @st.cache_data(show_spinner=True)
 def load_data() -> pd.DataFrame:
-    """
-    Load the hourly parking dataset.
-    We only assume basic columns; engineered model features are handled separately.
-    """
+    """Load the hourly parking dataset for UI + plots."""
     possible_files = [
         "banff_parking_engineered_HOURLY.csv",
         "banff_parking_engineered_HOURLY (1).csv",
@@ -142,7 +139,7 @@ def load_models_and_features():
 
 
 # ---------------------------------------------------
-# FEATURE PREPARATION FOR A SINGLE ROW
+# FEATURE BUILDING + PREDICTIONS
 # ---------------------------------------------------
 def build_feature_vector(row: pd.Series, features: List[str]) -> pd.DataFrame:
     """
@@ -188,9 +185,7 @@ def make_predictions(row: pd.Series,
 
 
 def congestion_level(percent_occupancy: float):
-    """
-    Convert predicted occupancy (0–1) to human label for congestion.
-    """
+    """Convert predicted occupancy (0–1) to label for congestion."""
     if percent_occupancy < 0.4:
         return "Low", "✅ Easy parking"
     elif percent_occupancy < 0.75:
@@ -199,232 +194,148 @@ def congestion_level(percent_occupancy: float):
         return "High", "🚨 Very crowded"
 
 
-# Load everything once
+# Cached SHAP computation for regression model
+@st.cache_resource(show_spinner=True)
+def compute_shap_global(data: pd.DataFrame,
+                        feature_list: List[str],
+                        reg_model,
+                        scaler,
+                        sample_size: int = 200):
+    """
+    Compute global SHAP values on a random sample for the regression model.
+    Done lazily so the app stays responsive.
+    """
+    try:
+        import shap
+    except ModuleNotFoundError:
+        return None, None
+
+    if len(data) == 0:
+        return None, None
+
+    sample_size = min(sample_size, len(data))
+    idx = np.random.choice(len(data), size=sample_size, replace=False)
+    sample = data.iloc[idx].copy()
+
+    # Build feature matrix from sample
+    rows = []
+    for _, r in sample.iterrows():
+        rows.append(build_feature_vector(r, feature_list).iloc[0])
+    X = pd.DataFrame(rows)[feature_list]
+
+    X_scaled = scaler.transform(X)
+    explainer = shap.TreeExplainer(reg_model)
+    shap_values = explainer.shap_values(X_scaled)
+
+    return shap_values, X
+
+
+# Load data & models
 data = load_data()
 reg_model, cls_model, scaler, feature_list = load_models_and_features()
 
 # ---------------------------------------------------
-# HEADER
+# HEADER (always visible)
 # ---------------------------------------------------
-st.markdown('<div class="app-header">Banff Parking AI – Research Questions</div>', unsafe_allow_html=True)
+st.markdown('<div class="app-header">Banff Smart Parking</div>', unsafe_allow_html=True)
 st.markdown(
-    """
-    <div class="app-subtitle">
-    This app answers two core questions for the Town of Banff:
-    <br>
-    <b>Q1:</b> Which factors (time, weekday, weather, trends) best predict parking demand?
-    <br>
-    <b>Q2:</b> Can we forecast, hour by hour, when a lot will be near capacity (&gt; 90% full)?
-    </div>
-    """,
+    '<div class="app-subtitle">Machine-learning & XAI dashboard for hourly parking demand forecasting.</div>',
     unsafe_allow_html=True
 )
 
 # ---------------------------------------------------
-# TABS ALIGNED WITH PROBLEM STATEMENTS
+# TABS – PURE APP STYLE
 # ---------------------------------------------------
 with st.container():
     st.markdown('<div class="pill-tabs">', unsafe_allow_html=True)
-    tab_q1, tab_q2, tab_data = st.tabs(
-        ["🧠 Q1 – Key Predictors", "🔮 Q2 – Near-Capacity Forecast", "📊 Data Explorer"]
+    tab_overview, tab_forecast, tab_xai, tab_data = st.tabs(
+        ["🏠 Overview", "🚗 Forecast", "🧠 XAI Insights", "📊 Data"]
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------
-# 🧠 TAB Q1 – KEY PREDICTORS (Problem Statement 1)
+# 🏠 OVERVIEW TAB
 # ---------------------------------------------------
-with tab_q1:
-    st.markdown("### Q1. Which factors are the most reliable predictors of parking demand?")
-    st.markdown(
-        "This view uses **model feature importance** to show which variables "
-        "(time of day, day of week, weather, recent history, etc.) drive the predictions."
-    )
+with tab_overview:
+    # Top cards
+    c1, c2, c3, c4 = st.columns(4)
 
-    col_top, col_bottom = st.columns([1.1, 1])
+    with c1:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown('<div class="metric-title">Records</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-value">{len(data):,}</div>', unsafe_allow_html=True)
+        st.markdown('<span class="metric-badge">Hourly observations</span>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    # --- Top 5 features summary (combined from reg + cls) ---
-    with col_top:
-        st.markdown("#### Top predictors (automatically extracted from the models)")
+    with c2:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        units = data["Unit"].nunique()
+        st.markdown('<div class="metric-title">Parking lots</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-value">{units}</div>', unsafe_allow_html=True)
+        st.markdown('<span class="metric-badge">Different units in Banff</span>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        try:
-            combined_df = None
+    with c3:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        if "Timestamp" in data.columns:
+            min_date = data["Timestamp"].min().strftime("%Y-%m-%d")
+            max_date = data["Timestamp"].max().strftime("%Y-%m-%d")
+        else:
+            min_date = max_date = "-"
+        st.markdown('<div class="metric-title">Data range</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-value">{min_date}</div>', unsafe_allow_html=True)
+        st.markdown(f'<span class="metric-badge">to {max_date}</span>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-            if hasattr(reg_model, "feature_importances_"):
-                fi_reg = pd.DataFrame({
-                    "Feature": feature_list,
-                    "Reg_Importance": reg_model.feature_importances_
-                })
-                combined_df = fi_reg.copy()
-            if hasattr(cls_model, "feature_importances_"):
-                fi_cls = pd.DataFrame({
-                    "Feature": feature_list,
-                    "Cls_Importance": cls_model.feature_importances_
-                })
-                if combined_df is None:
-                    combined_df = fi_cls.copy()
-                else:
-                    combined_df = combined_df.merge(fi_cls, on="Feature", how="outer")
+    with c4:
+        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown('<div class="metric-title">Models</div>', unsafe_allow_html=True)
+        st.markdown('<div class="metric-value">XGBoost & LGBM</div>', unsafe_allow_html=True)
+        st.markdown('<span class="metric-badge">Reg: occupancy • Cls: near-full</span>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-            if combined_df is not None:
-                combined_df = combined_df.fillna(0.0)
-                combined_df["Combined"] = combined_df.get("Reg_Importance", 0) + combined_df.get("Cls_Importance", 0)
-                top5 = combined_df.sort_values("Combined", ascending=False).head(5)
+    # Quick explanation row (short)
+    col_left, col_right = st.columns([1.3, 1])
 
-                # Cards for top 3
-                c1, c2, c3 = st.columns(3)
-                top_features = top5["Feature"].tolist()
+    with col_left:
+        st.markdown("#### How this app helps")
+        st.markdown(
+            "- Forecasts **hourly occupancy** per parking lot.\n"
+            "- Estimates **risk of near capacity (> 90%)**.\n"
+            "- Shows **which factors drive demand** using ML + XAI.\n"
+            "- Built on: time-of-day, weekday/weekend, weather, and past occupancy trends."
+        )
 
-                def nice_name(feat: str) -> str:
-                    # Quick friendly-name mapping
-                    mapping_keywords = [
-                        ("Hour", "Time of day"),
-                        ("hour", "Time of day"),
-                        ("DayOfWeek", "Day of week"),
-                        ("dow", "Day of week"),
-                        ("Month", "Month / season"),
-                        ("Max Temp", "Max temperature"),
-                        ("Min Temp", "Min temperature"),
-                        ("Total Precip", "Precipitation"),
-                        ("Gust", "Wind / gusts"),
-                        ("Occupancy", "Recent occupancy"),
-                        ("Percent_Occupancy", "Recent occupancy"),
-                        ("roll", "Rolling average / trend"),
-                        ("lag", "Lagged history"),
-                        ("is_weekend", "Weekend / weekday"),
-                        ("Unit_", "Specific parking lot"),
-                    ]
-                    label = feat
-                    for key, nice in mapping_keywords:
-                        if key in feat:
-                            label = nice
-                            break
-                    return label
-
-                # Card 1
-                with c1:
-                    if len(top_features) > 0:
-                        st.markdown('<div class="card">', unsafe_allow_html=True)
-                        st.markdown('<div class="metric-title">#1 Predictor</div>', unsafe_allow_html=True)
-                        st.markdown(
-                            f'<div class="metric-value">{nice_name(top_features[0])}</div>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown(
-                            f'<span class="metric-badge">{top_features[0]}</span>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown('</div>', unsafe_allow_html=True)
-
-                # Card 2
-                with c2:
-                    if len(top_features) > 1:
-                        st.markdown('<div class="card">', unsafe_allow_html=True)
-                        st.markdown('<div class="metric-title">#2 Predictor</div>', unsafe_allow_html=True)
-                        st.markdown(
-                            f'<div class="metric-value">{nice_name(top_features[1])}</div>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown(
-                            f'<span class="metric-badge">{top_features[1]}</span>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown('</div>', unsafe_allow_html=True)
-
-                # Card 3
-                with c3:
-                    if len(top_features) > 2:
-                        st.markdown('<div class="card">', unsafe_allow_html=True)
-                        st.markdown('<div class="metric-title">#3 Predictor</div>', unsafe_allow_html=True)
-                        st.markdown(
-                            f'<div class="metric-value">{nice_name(top_features[2])}</div>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown(
-                            f'<span class="metric-badge">{top_features[2]}</span>',
-                            unsafe_allow_html=True
-                        )
-                        st.markdown('</div>', unsafe_allow_html=True)
-
-                st.markdown("**Model answer to Q1:**")
-                st.markdown(
-                    "- Parking demand is mainly explained by **time-of-day / day-of-week patterns**, "
-                    "the **recent occupancy history (lags / rolling averages)**, and **weather variables** "
-                    "(temperature, precipitation, wind). "
-                    "These appear at the top of the importance ranking."
-                )
+    with col_right:
+        st.markdown("#### Typical daily pattern (example)")
+        unit_example = data["Unit"].value_counts().index[0]
+        df_ex = data[data["Unit"] == unit_example].copy()
+        if "Timestamp" in df_ex.columns:
+            date_ex = df_ex["Timestamp"].dt.date.mode()[0]
+            day_df = df_ex[df_ex["Timestamp"].dt.date == date_ex]
+            if not day_df.empty:
+                fig, ax = plt.subplots()
+                ax.plot(day_df["Hour"], day_df["Percent_Occupancy"] * 100, marker="o")
+                ax.set_xlabel("Hour")
+                ax.set_ylabel("Occupancy (%)")
+                ax.set_title(f"{unit_example} on {date_ex}")
+                ax.set_xticks(range(0, 24, 2))
+                ax.grid(True, linestyle="--", linewidth=0.4)
+                st.pyplot(fig)
             else:
-                st.info("Models do not expose feature_importances_.")
-        except Exception as e:
-            st.error(f"Could not compute top predictors: {e}")
-
-    # --- Detailed feature importance plots ---
-    with col_bottom:
-        st.markdown("#### Detailed feature importance")
-
-        left, right = st.columns(2)
-
-        # Regression model
-        with left:
-            st.markdown("**Regression model (predicts # of occupied stalls)**")
-            try:
-                if hasattr(reg_model, "feature_importances_"):
-                    fi_reg = pd.DataFrame({
-                        "Feature": feature_list,
-                        "Importance": reg_model.feature_importances_
-                    }).sort_values("Importance", ascending=False)[:15]
-
-                    fig1, ax1 = plt.subplots(figsize=(5, 5))
-                    ax1.barh(fi_reg["Feature"], fi_reg["Importance"])
-                    ax1.set_xlabel("Importance")
-                    ax1.set_ylabel("")
-                    ax1.set_title("Top features")
-                    ax1.invert_yaxis()
-                    st.pyplot(fig1)
-                else:
-                    st.info("Regression model does not expose feature_importances_.")
-            except Exception as e:
-                st.error(f"Could not plot regression features: {e}")
-
-        # Classification model
-        with right:
-            st.markdown("**Classification model (probability lot is near full)**")
-            try:
-                if hasattr(cls_model, "feature_importances_"):
-                    fi_cls = pd.DataFrame({
-                        "Feature": feature_list,
-                        "Importance": cls_model.feature_importances_
-                    }).sort_values("Importance", ascending=False)[:15]
-
-                    fig2, ax2 = plt.subplots(figsize=(5, 5))
-                    ax2.barh(fi_cls["Feature"], fi_cls["Importance"])
-                    ax2.set_xlabel("Importance")
-                    ax2.set_ylabel("")
-                    ax2.set_title("Top features")
-                    ax2.invert_yaxis()
-                    st.pyplot(fig2)
-                else:
-                    st.info("Classification model does not expose feature_importances_.")
-            except Exception as e:
-                st.error(f"Could not plot classification features: {e}")
-
-    st.markdown("---")
-    st.markdown(
-        "➡️ **Interpretation for your report:** Time of day, day of week, and recent occupancy "
-        "are the most stable and reliable drivers of parking demand, with weather and seasonal "
-        "effects adding additional variation."
-    )
+                st.info("No data for sample pattern.")
+        else:
+            st.info("Timestamp column missing in data.")
 
 # ---------------------------------------------------
-# 🔮 TAB Q2 – HOURLY NEAR-CAPACITY FORECAST (Problem Statement 2)
+# 🚗 FORECAST TAB – MAIN PREDICTION UI
 # ---------------------------------------------------
-with tab_q2:
-    st.markdown("### Q2. Can we forecast, hour-by-hour, when a lot will be near capacity (> 90% full)?")
+with tab_forecast:
+    st.markdown("### Hourly parking demand forecast")
     st.markdown(
-        "Use the controls below to select a parking lot, date, and hour. "
-        "The system predicts occupancy and the probability that the lot is **near full**."
+        "Select a parking lot, date, and time. The app predicts occupancy and near-full risk."
     )
 
-    # --- Scenario selection ---
     c1, c2, c3 = st.columns(3)
     with c1:
         pred_unit = st.selectbox(
@@ -453,7 +364,7 @@ with tab_q2:
 
     with c3:
         pred_time = st.time_input(
-            "Time",
+            "Time (hourly)",
             value=time(12, 0),
             step=3600,
             key="pred_time"
@@ -471,7 +382,6 @@ with tab_q2:
         else:
             row = row_match.iloc[0]
 
-            # Context line
             if all(col in row.index for col in ["Max Temp (°C)", "Min Temp (°C)", "Total Precip (mm)", "Spd of Max Gust (km/h)"]):
                 weather_str = (
                     f"{row['Max Temp (°C)']}°C / {row['Min Temp (°C)']}°C • "
@@ -489,7 +399,7 @@ with tab_q2:
                 f"- **Weather:** {weather_str}"
             )
 
-            run = st.button("🚗 Run hourly forecast")
+            run = st.button("🚗 Run forecast for this hour")
 
             if run:
                 try:
@@ -528,7 +438,7 @@ with tab_q2:
                             unsafe_allow_html=True
                         )
                         st.markdown(
-                            f'<span class="metric-badge">Model: Is_Full classifier</span>',
+                            '<span class="metric-badge">Model: classifier</span>',
                             unsafe_allow_html=True
                         )
                         st.markdown('</div>', unsafe_allow_html=True)
@@ -561,7 +471,7 @@ with tab_q2:
                         )
                         st.markdown('</div>', unsafe_allow_html=True)
 
-                    # Historical actual for comparison
+                    # Optional: compare with actual historic value
                     if all(col in row.index for col in ["Occupancy", "Capacity", "Percent_Occupancy", "Is_Full"]):
                         st.markdown("#### Historical value (same hour, same lot)")
                         st.markdown(
@@ -570,28 +480,150 @@ with tab_q2:
                             f"- **Actual Is_Full label:** {row['Is_Full']}"
                         )
 
-                    st.markdown("---")
-                    st.markdown(
-                        "➡️ **Interpretation for your report:** "
-                        "This system provides an hourly forecast of occupancy and near-full risk. "
-                        "By checking if predicted occupancy exceeds 90%, it can flag hours "
-                        "when a specific lot is likely to operate at or near capacity."
-                    )
-
                 except Exception as e:
                     st.error(f"Prediction error: {e}")
 
+            # Daily curve (hour-by-hour forecast for selected day)
+            st.markdown("### Hour-by-hour forecast for this day")
+            day_df = filtered.copy()
+            if not day_df.empty:
+                preds = []
+                for _, r in day_df.iterrows():
+                    try:
+                        yp, _, _ = make_predictions(
+                            r, reg_model, cls_model, scaler, feature_list
+                        )
+                        cap = r.get("Capacity", 0)
+                        if cap > 0:
+                            preds.append(min(max(yp / cap, 0), 1))
+                        else:
+                            preds.append(0.0)
+                    except Exception:
+                        preds.append(np.nan)
+
+                fig2, ax2 = plt.subplots()
+                ax2.plot(day_df["Hour"], np.array(preds) * 100, marker="o")
+                ax2.set_xlabel("Hour")
+                ax2.set_ylabel("Predicted occupancy (%)")
+                ax2.set_title(f"Forecast for {pred_unit} on {pred_date}")
+                ax2.set_xticks(range(0, 24, 2))
+                ax2.grid(True, linestyle="--", linewidth=0.4)
+                st.pyplot(fig2)
+            else:
+                st.info("No rows for this day to plot.")
+
 # ---------------------------------------------------
-# 📊 DATA EXPLORER – CONTEXT & TRENDS
+# 🧠 XAI INSIGHTS TAB – FEATURE IMPORTANCE + SHAP
 # ---------------------------------------------------
-with tab_data:
-    st.markdown("### Data Explorer & Daily Patterns")
+with tab_xai:
+    st.markdown("### Explainable AI: what drives the predictions?")
     st.markdown(
-        "This tab gives context for the models: overall data size, range, and "
-        "typical daily occupancy patterns for each lot."
+        "This view shows **global drivers** (feature importance, SHAP summary) "
+        "and **local explanation** for a single prediction."
     )
 
-    # Top metrics row
+    # GLOBAL – SHAP summary for regression model
+    shap_values, X_shap = compute_shap_global(data, feature_list, reg_model, scaler)
+
+    col_left, col_right = st.columns(2)
+
+    with col_left:
+        st.markdown("#### Global importance (model built-in)")
+        try:
+            if hasattr(reg_model, "feature_importances_"):
+                fi_reg = pd.DataFrame({
+                    "Feature": feature_list,
+                    "Importance": reg_model.feature_importances_
+                }).sort_values("Importance", ascending=False)[:15]
+
+                fig1, ax1 = plt.subplots(figsize=(5, 5))
+                ax1.barh(fi_reg["Feature"], fi_reg["Importance"])
+                ax1.set_xlabel("Importance")
+                ax1.set_ylabel("")
+                ax1.set_title("Top features – regression model")
+                ax1.invert_yaxis()
+                st.pyplot(fig1)
+            else:
+                st.info("Regression model does not expose feature_importances_.")
+        except Exception as e:
+            st.error(f"Could not plot feature importance: {e}")
+
+    with col_right:
+        st.markdown("#### Global SHAP summary (regression)")
+        if shap_values is None or X_shap is None:
+            st.info("SHAP library not available or SHAP could not be computed.")
+        else:
+            try:
+                import shap
+                fig, ax = plt.subplots(figsize=(5, 5))
+                shap.summary_plot(shap_values, X_shap, show=False)
+                st.pyplot(fig)
+            except Exception as e:
+                st.error(f"Could not render SHAP summary plot: {e}")
+
+    st.markdown("---")
+    st.markdown("### Local explanation for one prediction")
+
+    # Select any row from data for explanation
+    idx = st.slider(
+        "Choose an hourly record to explain",
+        min_value=0,
+        max_value=len(data) - 1,
+        value=0,
+        step=1,
+    )
+    row_local = data.iloc[idx]
+
+    st.markdown(
+        f"- **Unit:** {row_local['Unit']}  \n"
+        f"- **Timestamp:** {row_local['Timestamp']}  \n"
+        f"- **Observed occupancy:** "
+        f"{row_local.get('Occupancy', 'N/A')} / {int(row_local.get('Capacity', 0))}"
+    )
+
+    if st.button("Explain this record", key="explain_button"):
+        # Make prediction for this row
+        try:
+            y_pred_l, full_prob_l, _ = make_predictions(
+                row_local, reg_model, cls_model, scaler, feature_list
+            )
+        except Exception as e:
+            st.error(f"Could not predict for local explanation: {e}")
+            y_pred_l, full_prob_l = None, None
+
+        if shap_values is None or X_shap is None:
+            st.info("SHAP global sample not available; local explanation disabled.")
+        else:
+            try:
+                import shap
+                # Rebuild features for this single row
+                X_local = build_feature_vector(row_local, feature_list)
+                X_local_scaled = scaler.transform(X_local)
+
+                explainer_local = shap.TreeExplainer(reg_model)
+                shap_local = explainer_local.shap_values(X_local_scaled)
+
+                st.markdown("#### SHAP contribution (top 10 features)")
+                fig_loc, ax_loc = plt.subplots(figsize=(5, 5))
+                shap.plots.bar(
+                    shap.Explanation(values=shap_local[0],
+                                     base_values=explainer_local.expected_value,
+                                     data=X_local.iloc[0],
+                                     feature_names=feature_list),
+                    max_display=10,
+                    show=False
+                )
+                st.pyplot(fig_loc)
+            except Exception as e:
+                st.error(f"Could not compute local SHAP explanation: {e}")
+
+# ---------------------------------------------------
+# 📊 DATA TAB – CONTEXT & EXPLORER
+# ---------------------------------------------------
+with tab_data:
+    st.markdown("### Data explorer & daily patterns")
+
+    # Metrics again for context
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -625,11 +657,11 @@ with tab_data:
         st.markdown('<span class="metric-badge">Is_Full (0/1)</span>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # Layout: chart + sample data
+    # Pattern + table
     left, right = st.columns([1.6, 1])
 
     with left:
-        st.markdown("#### ⏰ Daily pattern by lot")
+        st.markdown("#### Daily pattern by lot")
 
         unit_list = sorted(data["Unit"].unique())
         selected_unit = st.selectbox("Lot", unit_list, key="dash_unit")
@@ -665,13 +697,13 @@ with tab_data:
             st.info("No dates available for this lot.")
 
     with right:
-        st.markdown("#### 🔎 Sample data")
+        st.markdown("#### Sample data")
         cols_to_show = [
             c for c in ["Timestamp", "Unit", "Occupancy", "Capacity", "Percent_Occupancy"]
             if c in data.columns
         ]
         st.dataframe(
             data[cols_to_show]
-            .head(15)
+            .head(20)
             .reset_index(drop=True)
         )
